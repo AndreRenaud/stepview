@@ -303,7 +303,7 @@ func (c *cdt) findEdge(a, b int) (int, int, bool) {
 	start := c.vt[a]
 	t := start
 	// Walk around a in one direction, then the other if the fan is open.
-	for dir := 0; dir < 2; dir++ {
+	for dir := range 2 {
 		t = start
 		for steps := 0; steps < 10000 && t >= 0; steps++ {
 			tr := &c.tris[t]
@@ -374,7 +374,7 @@ func (c *cdt) addConstraintDepth(a, b, depth int) error {
 	t := start
 	var p, q int
 	found := false
-	for steps := 0; steps < 10000; steps++ {
+	for range 10000 {
 		tr := &c.tris[t]
 		k := -1
 		for m := range 3 {
@@ -418,7 +418,7 @@ func (c *cdt) addConstraintDepth(a, b, depth int) error {
 	var crossed [][2]int
 	crossed = append(crossed, [2]int{p, q})
 	cur := t
-	for steps := 0; steps < 100000; steps++ {
+	for range 100000 {
 		// Triangle across edge p-q from cur.
 		tr := &c.tris[cur]
 		e := -1
@@ -506,7 +506,7 @@ func (c *cdt) addConstraintDepth(a, b, depth int) error {
 	c.markConstrained(a, b)
 	c.ccount[edgeKey(a, b)]++
 	// Restore the Delaunay property around newly created edges.
-	for pass := 0; pass < 8; pass++ {
+	for range 8 {
 		changed := false
 		for k, e := range created {
 			if (e[0] == a && e[1] == b) || (e[0] == b && e[1] == a) {

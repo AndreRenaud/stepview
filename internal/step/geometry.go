@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 )
 
@@ -908,14 +909,15 @@ func entityTypeName(e *Entity) string {
 	if e.Type != "" {
 		return e.Type
 	}
-	s := "("
+	var s strings.Builder
+	s.WriteString("(")
 	for i, p := range e.Parts {
 		if i > 0 {
-			s += " "
+			s.WriteString(" ")
 		}
-		s += p.Type
+		s.WriteString(p.Type)
 	}
-	return s + ")"
+	return s.String() + ")"
 }
 
 func ints(l []Value) []int {
@@ -949,7 +951,7 @@ func implicitKnots(e *Entity, nCtrl, p int) []float64 {
 			k++
 		}
 		for s := 1; s < segs; s++ {
-			for j := 0; j < p; j++ {
+			for range p {
 				U[k] = float64(s)
 				k++
 			}

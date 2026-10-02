@@ -11,7 +11,6 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
-	"github.com/solarlune/tetra3d"
 
 	"github.com/AndreRenaud/stepview/internal/step"
 )
@@ -49,7 +48,7 @@ func (o *orbit) basis() (right, up, back step.Vec3) {
 
 func (o *orbit) eye() step.Vec3 { return o.target.Add(o.back().Scale(o.dist)) }
 
-// view3D renders the document with tetra3d and handles camera interaction.
+// view3D renders the document and handles camera interaction.
 type view3D struct {
 	guigui.DefaultWidget
 
@@ -58,14 +57,14 @@ type view3D struct {
 	renderedGen int
 	needRender  bool
 
-	camera *tetra3d.Camera
-	wire   *ebiten.Image
+	renderer renderer
+	size     image.Point // size of the last render
+	wire     *ebiten.Image
 
 	wireframe bool
 	white     *ebiten.Image
 
-	orbit  orbit
-	radius float64 // model radius, for clip planes
+	orbit orbit
 
 	dragButton ebiten.MouseButton
 	dragging   bool
@@ -145,8 +144,6 @@ func (v *view3D) fit(sub int) {
 	if b.Empty() {
 		return
 	}
-	all := v.doc.bounds
-	v.radius = math.Max(all.Diag()/2, 1e-6)
 	r := math.Max(b.Diag()/2, 1e-6)
 	v.orbit.target = b.Center()
 	half := v.orbit.fov / 2 * math.Pi / 180
@@ -168,53 +165,21 @@ func (v *view3D) requestRender() {
 	guigui.RequestRedraw(v)
 }
 
-func (v *view3D) ensureCamera(w, h int) {
-	if v.camera == nil {
-		v.camera = tetra3d.NewCamera("view", w, h)
-		v.camera.SetPerspective(true)
-		v.camera.DebugInfo.On = false
-		v.needRender = true
-	}
-	if cw, ch := v.camera.Size(); cw != w || ch != h {
-		v.camera.Resize(w, h)
-		v.needRender = true
-	}
-}
-
-// applyCamera pushes the orbit state into the tetra3d camera.
-func (v *view3D) applyCamera() {
-	right, up, back := v.orbit.basis()
-	eye := v.orbit.eye()
-	r, u, b := toT(right), toT(up), toT(back)
-	v.camera.SetLocalPositionVec(toT(eye))
-	v.camera.SetLocalRotation(tetra3d.Matrix4{
-		{r.X, r.Y, r.Z, 0},
-		{u.X, u.Y, u.Z, 0},
-		{b.X, b.Y, b.Z, 0},
-		{0, 0, 0, 1},
-	})
-	v.camera.SetFieldOfView(float32(v.orbit.fov))
-	far := v.orbit.dist + v.radius*2.5
-	v.camera.SetFar(float32(far))
-	v.camera.SetNear(float32(far / 5000))
-}
-
-func (v *view3D) render(context *guigui.Context) {
-	v.applyCamera()
+func (v *view3D) render(context *guigui.Context, size image.Point) {
+	c := v.orbit.camera(size.X, size.Y)
 	if v.wireframe {
-		w, h := v.camera.Size()
-		if v.wire == nil || v.wire.Bounds().Dx() != w || v.wire.Bounds().Dy() != h {
+		if v.wire == nil || v.wire.Bounds().Size() != size {
 			if v.wire != nil {
 				v.wire.Deallocate()
 			}
-			v.wire = ebiten.NewImage(w, h)
+			v.wire = ebiten.NewImage(size.X, size.Y)
 		}
 		v.wire.Clear()
-		v.renderWireframe(v.wire, float32(1.2*context.Scale()), context.ColorMode() == ebiten.ColorModeDark)
+		v.renderWireframe(v.wire, &c, float32(1.2*context.Scale()), context.ColorMode() == ebiten.ColorModeDark)
 	} else {
-		v.camera.ClearWithColor(tetra3d.NewColor4(0, 0, 0, 0))
-		v.camera.RenderScene(v.doc.scene)
+		v.renderer.render(v.doc, &c)
 	}
+	v.size = size
 	v.needRender = false
 	v.renderedDoc = v.doc
 	v.renderedGen = v.doc.gen
@@ -223,14 +188,12 @@ func (v *view3D) render(context *guigui.Context) {
 // ray returns a picking ray in model coordinates for a point in widget
 // pixels.
 func (v *view3D) ray(p image.Point) (step.Vec3, step.Vec3, bool) {
-	if v.camera == nil {
+	if v.viewSize.X <= 0 || v.viewSize.Y <= 0 {
 		return step.Vec3{}, step.Vec3{}, false
 	}
-	v.applyCamera()
-	far := v.camera.ScreenToWorldPixels(p.X, p.Y, 1)
-	o := fromT(v.camera.WorldPosition())
-	d := fromT(far).Sub(o).Norm()
-	return o, d, d.Len() > 0.5
+	c := v.orbit.camera(v.viewSize.X, v.viewSize.Y)
+	o, d := c.ray(float64(p.X)+0.5, float64(p.Y)+0.5)
+	return o, d, true
 }
 
 func (v *view3D) HandlePointingInput(context *guigui.Context, widgetBounds *guigui.WidgetBounds) guigui.HandleInputResult {
@@ -348,16 +311,15 @@ func (v *view3D) Draw(context *guigui.Context, widgetBounds *guigui.WidgetBounds
 	if v.doc == nil || b.Dx() < 2 || b.Dy() < 2 {
 		return
 	}
-	v.ensureCamera(b.Dx(), b.Dy())
-	if v.needRender || v.renderedDoc != v.doc || v.renderedGen != v.doc.gen {
-		v.render(context)
+	if v.needRender || v.size != b.Size() || v.renderedDoc != v.doc || v.renderedGen != v.doc.gen {
+		v.render(context, b.Size())
 	}
 	op := &ebiten.DrawImageOptions{}
 	op.GeoM.Translate(float64(b.Min.X), float64(b.Min.Y))
 	if v.wireframe {
 		dst.DrawImage(v.wire, op)
 	} else {
-		dst.DrawImage(v.camera.ColorTexture(), op)
+		dst.DrawImage(v.renderer.color, op)
 	}
 	v.drawAxes(context, dst, b)
 }
@@ -399,7 +361,7 @@ func (v *view3D) drawAxes(context *guigui.Context, dst *ebiten.Image, b image.Re
 	}
 	// Draw back-to-front so nearer axes overlap farther ones.
 	order := []int{0, 1, 2}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		for j := i + 1; j < 3; j++ {
 			if axes[order[j]].d.Dot(back) < axes[order[i]].d.Dot(back) {
 				order[i], order[j] = order[j], order[i]

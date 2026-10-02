@@ -100,8 +100,8 @@ func nodeTransform(n *gltf.Node) step.Affine {
 		{2 * (x*y + z*w), 1 - 2*(x*x+z*z), 2 * (y*z - x*w)},
 		{2 * (x*z - y*w), 2 * (y*z + x*w), 1 - 2*(x*x+y*y)},
 	}
-	for i := 0; i < 3; i++ {
-		for j := 0; j < 3; j++ {
+	for i := range 3 {
+		for j := range 3 {
 			r[i][j] *= s[j]
 		}
 	}
@@ -213,12 +213,12 @@ func (l *loader) primitive(p *gltf.Primitive) (*step.Mesh, error) {
 	for k := range pos {
 		c := [3]float32{float32(base[0]), float32(base[1]), float32(base[2])}
 		if k < len(cols) {
-			for j := 0; j < 3; j++ {
+			for j := range 3 {
 				c[j] *= float32(cols[k][j]) / 255
 			}
 		}
 		// glTF base colours are linear; convert to sRGB-ish for display.
-		for j := 0; j < 3; j++ {
+		for j := range 3 {
 			c[j] = float32(math.Pow(float64(c[j]), 1/2.2))
 		}
 		m.Colors = append(m.Colors, c[0], c[1], c[2])

@@ -3,14 +3,10 @@ package main
 import (
 	"math"
 
-	"github.com/solarlune/tetra3d"
+	"github.com/hajimehoshi/ebiten/v2"
 
 	"github.com/AndreRenaud/stepview/internal/step"
 )
-
-// maxChunkTris is the triangle budget of one rendered chunk (tetra3d's
-// limit for one mesh part is 21845).
-const maxChunkTris = 12000
 
 // highlightColour is blended into selected geometry.
 var highlightColour = [3]float32{1.0, 0.55, 0.1}
@@ -57,30 +53,23 @@ type instance struct {
 	mesh   *step.Mesh
 	world  step.Affine // model space (mm, Z up)
 	bounds step.Box    // world bounding box
-}
-
-type chunkEntry struct {
-	inst       int
-	tri0, tri1 int // triangle range within the instance mesh
-}
-
-type chunk struct {
-	entries []chunkEntry
-	model   *tetra3d.Model
+	vert0  int         // first vertex in document.verts
 }
 
 // document is a loaded model prepared for display.
 type document struct {
-	path      string
-	model     *step.Model
-	nodes     []viewNode
-	insts     []instance
-	chunks    []*chunk
-	instChunk [][]int // instance -> chunk indices
+	path  string
+	model *step.Model
+	nodes []viewNode
+	insts []instance
 
-	scene     *tetra3d.Scene
-	container *tetra3d.Node
-	material  *tetra3d.Material
+	// The vertices of every instance, in world space, ready for the
+	// renderer.
+	pos         []float32       // 3 per vertex
+	shade       []float32       // 4 per vertex: unlit colour and brightness
+	verts       []ebiten.Vertex // colours; the renderer fills in the rest
+	visible     []int           // instances that are not hidden
+	visibleTris int
 
 	selected  int // node index, or -1
 	bounds    step.Box
@@ -88,16 +77,6 @@ type document struct {
 	gen       int // incremented on every visual change
 
 	edgeCache map[*step.Mesh][]uint32 // feature edges for wireframe mode
-}
-
-// toT converts model coordinates (Z up) to tetra3d coordinates (Y up).
-func toT(p step.Vec3) tetra3d.Vector3 {
-	return tetra3d.Vector3{X: float32(p.X), Y: float32(p.Z), Z: float32(-p.Y)}
-}
-
-// fromT converts tetra3d coordinates back to model coordinates.
-func fromT(v tetra3d.Vector3) step.Vec3 {
-	return step.Vec3{X: float64(v.X), Y: float64(-v.Z), Z: float64(v.Y)}
 }
 
 func newDocument(path string, m *step.Model) *document {
@@ -110,20 +89,7 @@ func newDocument(path string, m *step.Model) *document {
 		n := &d.nodes[i]
 		n.collapsed = n.end > i+1 && n.depth >= 1
 	}
-	d.scene = tetra3d.NewScene("model")
-	d.scene.World.FogOn = false
-	d.scene.World.LightingOn = false
-	d.container = tetra3d.NewNode("geometry")
-	d.scene.Root.AddChildren(d.container)
-	d.material = tetra3d.NewMaterial("vertex colours")
-	d.material.BackfaceCulling = true
-	// Lighting is baked into the vertex colours (see lighting), which is
-	// much cheaper than tetra3d's per-frame vertex lighting.
-	d.material.Shadeless = true
-	d.buildChunks()
-	for _, c := range d.chunks {
-		d.rebuildChunk(c)
-	}
+	d.buildGeometry()
 	return d
 }
 
@@ -149,105 +115,62 @@ func (d *document) addNode(n *step.Node, parentWorld step.Affine, parent, depth 
 	d.nodes[idx].end = len(d.nodes)
 }
 
-// buildChunks distributes instance geometry over chunks.
-//
-// tetra3d depth tests between mesh parts but only sorts triangles (by
-// centre) within one, and every part costs several full-screen passes. So
-// instances share a chunk only when their bounding boxes are disjoint, where
-// painter's ordering is reliable; touching or nested parts (components on a
-// board, bolts in holes) end up in different chunks and are depth tested.
-func (d *document) buildChunks() {
-	type piece struct {
-		inst, tri0, tri1 int
+// buildGeometry places every instance's vertices in world space, with
+// lighting baked into their colours.
+func (d *document) buildGeometry() {
+	nv := 0
+	for i := range d.insts {
+		d.insts[i].vert0 = nv
+		nv += len(d.insts[i].mesh.Positions) / 3
 	}
-	type openChunk struct {
-		c     *chunk
-		idx   int
-		tris  int
-		boxes []step.Box
-	}
-	var pieces []piece
-	for ii, inst := range d.insts {
-		m := inst.mesh
-		total := len(m.Indices) / 3
-		if total <= maxChunkTris {
-			pieces = append(pieces, piece{ii, 0, total})
-			continue
+	d.pos = make([]float32, nv*3)
+	d.shade = make([]float32, nv*4)
+	d.verts = make([]ebiten.Vertex, nv)
+	parallelEach(len(d.insts), func(i int) {
+		in := &d.insts[i]
+		m := in.mesh
+		for k := 0; k < len(m.Positions)/3; k++ {
+			p := in.world.Apply(step.Vec3{X: float64(m.Positions[k*3]), Y: float64(m.Positions[k*3+1]), Z: float64(m.Positions[k*3+2])})
+			n := in.world.ApplyNormal(step.Vec3{X: float64(m.Normals[k*3]), Y: float64(m.Normals[k*3+1]), Z: float64(m.Normals[k*3+2])})
+			v := in.vert0 + k
+			d.pos[v*3], d.pos[v*3+1], d.pos[v*3+2] = float32(p.X), float32(p.Y), float32(p.Z)
+			copy(d.shade[v*4:v*4+3], m.Colors[k*3:k*3+3])
+			d.shade[v*4+3] = lighting(n)
 		}
-		// Split large meshes at face boundaries.
-		bounds := make([]int, 0, len(m.FaceStarts)+1)
-		for _, s := range m.FaceStarts {
-			bounds = append(bounds, int(s)/3)
-		}
-		bounds = append(bounds, total)
-		t, bi := 0, 0
-		for t < total {
-			end := min(total, t+maxChunkTris)
-			if end < total {
-				for bi < len(bounds) && bounds[bi] <= t {
-					bi++
-				}
-				best := -1
-				for k := bi; k < len(bounds) && bounds[k] <= end; k++ {
-					best = bounds[k]
-				}
-				if best > t {
-					end = best
-				}
-			}
-			pieces = append(pieces, piece{ii, t, end})
-			t = end
-		}
-	}
-	d.instChunk = make([][]int, len(d.insts))
-	var open []*openChunk
-	for _, p := range pieces {
-		box := d.insts[p.inst].bounds
-		n := p.tri1 - p.tri0
-		var target *openChunk
-		for _, oc := range open {
-			if oc.tris+n > maxChunkTris {
-				continue
-			}
-			ok := true
-			for _, b := range oc.boxes {
-				if boxesIntersect(b, box) {
-					ok = false
-					break
-				}
-			}
-			if ok {
-				target = oc
-				break
+		d.paint(i)
+	})
+	d.updateVisible()
+}
+
+// paint sets the colours of an instance's vertices.
+func (d *document) paint(i int) {
+	in := &d.insts[i]
+	sel := d.isSelected(in.node)
+	for v := in.vert0; v < in.vert0+len(in.mesh.Positions)/3; v++ {
+		col := [3]float32(d.shade[v*4 : v*4+3])
+		if sel {
+			for j := range col {
+				col[j] = col[j]*0.35 + highlightColour[j]*0.65
 			}
 		}
-		if target == nil {
-			target = &openChunk{c: &chunk{}, idx: len(d.chunks)}
-			d.chunks = append(d.chunks, target.c)
-			open = append(open, target)
-		}
-		target.c.entries = append(target.c.entries, chunkEntry{inst: p.inst, tri0: p.tri0, tri1: p.tri1})
-		target.tris += n
-		target.boxes = append(target.boxes, box)
-		if l := d.instChunk[p.inst]; len(l) == 0 || l[len(l)-1] != target.idx {
-			d.instChunk[p.inst] = append(d.instChunk[p.inst], target.idx)
-		}
-		// Retire full chunks so the search stays short.
-		if target.tris > maxChunkTris*9/10 {
-			for i, oc := range open {
-				if oc == target {
-					open = append(open[:i], open[i+1:]...)
-					break
-				}
-			}
-		}
+		l := d.shade[v*4+3]
+		d.verts[v].ColorR = min(1, col[0]*l)
+		d.verts[v].ColorG = min(1, col[1]*l)
+		d.verts[v].ColorB = min(1, col[2]*l)
+		d.verts[v].ColorA = 1
 	}
 }
 
-func boxesIntersect(a, b step.Box) bool {
-	return a.Min.X <= b.Max.X && b.Min.X <= a.Max.X &&
-		a.Min.Y <= b.Max.Y && b.Min.Y <= a.Max.Y &&
-		a.Min.Z <= b.Max.Z && b.Min.Z <= a.Max.Z
+// updateVisible lists the instances that are not hidden.
+func (d *document) updateVisible() {
+	d.visible = d.visible[:0]
+	d.visibleTris = 0
+	for i, in := range d.insts {
+		if !d.effectiveHidden(in.node) {
+			d.visible = append(d.visible, i)
+			d.visibleTris += len(in.mesh.Indices) / 3
+		}
+	}
 }
 
 // effectiveHidden reports whether a node or any ancestor is hidden.
@@ -267,93 +190,14 @@ func (d *document) isSelected(i int) bool {
 	return s >= 0 && i >= s && i < d.nodes[s].end
 }
 
-func (d *document) rebuildChunk(c *chunk) {
-	if c.model != nil {
-		d.container.RemoveChildren(c.model)
-		c.model = nil
-	}
-	var verts []tetra3d.VertexInfo
-	var idx []int
-	remap := map[uint32]int{}
-	for _, e := range c.entries {
-		inst := &d.insts[e.inst]
-		if d.effectiveHidden(inst.node) {
-			continue
-		}
-		sel := d.isSelected(inst.node)
-		m := inst.mesh
-		clear(remap)
-		for t := e.tri0; t < e.tri1; t++ {
-			for k := 0; k < 3; k++ {
-				vi := m.Indices[t*3+k]
-				if j, ok := remap[vi]; ok {
-					idx = append(idx, j)
-					continue
-				}
-				p := inst.world.Apply(step.Vec3{X: float64(m.Positions[vi*3]), Y: float64(m.Positions[vi*3+1]), Z: float64(m.Positions[vi*3+2])})
-				n := inst.world.ApplyNormal(step.Vec3{X: float64(m.Normals[vi*3]), Y: float64(m.Normals[vi*3+1]), Z: float64(m.Normals[vi*3+2])})
-				col := [3]float32{m.Colors[vi*3], m.Colors[vi*3+1], m.Colors[vi*3+2]}
-				if sel {
-					for j := range col {
-						col[j] = col[j]*0.35 + highlightColour[j]*0.65
-					}
-				}
-				l := lighting(n)
-				for j := range col {
-					col[j] = min(1, col[j]*l)
-				}
-				tp, tn := toT(p), toT(n)
-				verts = append(verts, tetra3d.VertexInfo{
-					X: tp.X, Y: tp.Y, Z: tp.Z,
-					NormalX: tn.X, NormalY: tn.Y, NormalZ: tn.Z,
-					Colors: []tetra3d.Color4{{R: col[0], G: col[1], B: col[2], A: 1}},
-				})
-				j := len(verts) - 1
-				remap[vi] = j
-				idx = append(idx, j)
-			}
-		}
-	}
-	if len(idx) == 0 {
-		return
-	}
-	mesh := tetra3d.NewMesh("chunk")
-	part := mesh.AddMeshPart(d.material)
-	mesh.AddVertices(verts...)
-	part.AddTriangles(idx...)
-	mesh.VertexActiveColorChannel = 0
-	mesh.UpdateBounds()
-	c.model = tetra3d.NewModel("chunk", mesh)
-	d.container.AddChildren(c.model)
-}
-
-// rebuildSubtree rebuilds every chunk containing geometry of node i's
-// subtree.
-func (d *document) rebuildSubtree(i int) {
-	if i < 0 || i >= len(d.nodes) {
-		return
-	}
-	dirty := map[int]bool{}
-	for n := i; n < d.nodes[i].end; n++ {
-		for _, ii := range d.nodes[n].insts {
-			for _, c := range d.instChunk[ii] {
-				dirty[c] = true
-			}
-		}
-	}
-	for c := range dirty {
-		d.rebuildChunk(d.chunks[c])
-	}
-	d.gen++
-}
-
 // setHidden changes a node's visibility.
 func (d *document) setHidden(i int, hidden bool) {
 	if i < 0 || i >= len(d.nodes) || d.nodes[i].hidden == hidden {
 		return
 	}
 	d.nodes[i].hidden = hidden
-	d.rebuildSubtree(i)
+	d.updateVisible()
+	d.gen++
 }
 
 // setSelected changes the selected node (-1 for none).
@@ -363,8 +207,16 @@ func (d *document) setSelected(i int) {
 	}
 	old := d.selected
 	d.selected = i
-	d.rebuildSubtree(old)
-	d.rebuildSubtree(i)
+	for _, sub := range []int{old, i} {
+		if sub < 0 || sub >= len(d.nodes) {
+			continue
+		}
+		for n := sub; n < d.nodes[sub].end; n++ {
+			for _, ii := range d.nodes[n].insts {
+				d.paint(ii)
+			}
+		}
+	}
 	d.gen++
 }
 
@@ -468,7 +320,7 @@ func rayBox(o, d step.Vec3, b step.Box, maxT float64) bool {
 		return false
 	}
 	t0, t1 := 0.0, maxT
-	for axis := 0; axis < 3; axis++ {
+	for axis := range 3 {
 		var oo, dd, lo, hi float64
 		switch axis {
 		case 0:

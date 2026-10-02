@@ -1,8 +1,8 @@
 # stepview
 
 A STEP (ISO 10303-21) model viewer written in Go, using
-[guigui](https://github.com/guigui-gui/guigui) for the UI,
-[tetra3d](https://github.com/SolarLune/tetra3d) for 3D rendering and
+[guigui](https://github.com/guigui-gui/guigui) and
+[Ebitengine](https://ebitengine.org) for the UI and rendering, and
 [sqweek/dialog](https://github.com/sqweek/dialog) for the native file dialog.
 glTF (`.gltf`/`.glb`) files can be opened too.
 
@@ -58,13 +58,14 @@ make install    # copy the app into /Applications
   refined until the chordal error is within tolerance. Edges are sampled once
   and shared, so adjacent faces meet without cracks.
 
-The viewer (package `main`) flattens the tree and groups part geometry into
-tetra3d meshes. tetra3d depth-tests between mesh parts but only sorts the
-triangles inside one, and every part costs several full-screen passes. So
-parts share a mesh only when their bounding boxes don't intersect, which keeps
-nested and touching parts depth-correct while keeping the draw count low.
-Lighting is a fixed studio rig baked into vertex colours. Picking is a CPU ray
-cast against the original triangles.
+The viewer (package `main`) flattens the tree and places every part's
+vertices in world space, with a fixed studio lighting rig baked into their
+colours. Each frame (`render.go`) projects them on all cores, drops triangles
+that face away or are off screen, cuts those crossing the near plane, and
+draws the rest. Ebitengine has no depth buffer, so the nearest surface is
+found in three passes that build a 24-bit depth one byte at a time with a
+"max" blend, followed by a colour pass. Picking is a CPU ray cast against the
+original triangles.
 
 `cmd/stepinfo` is a debugging tool. It prints load statistics and the product
 tree, and can render a preview PNG without opening a window:
@@ -91,11 +92,9 @@ with their reference images. `go test ./...` loads all of them.
 
 ## Limitations
 
-- tetra3d transforms, sorts and rasterises every triangle on the CPU each
-  frame. Models up to roughly 100k triangles stay interactive; a dense PCB
-  with ~250k triangles renders at about 15 FPS while rotating. Rendering only
-  happens when the view changes.
-- Inside a single part, triangles are depth-sorted rather than depth-buffered.
-  This can show small artefacts on strongly concave parts.
+- Vertices are projected on the CPU, and Ebitengine copies them for each of
+  the four passes. A PCB with ~250k triangles takes about 8 ms per frame on
+  an M1 Pro. Rendering only happens when the view changes.
+- Faces whose orientation is reversed in the file are culled as back faces.
 - Only B-rep and faceted geometry is shown. Wireframe, PMI and tessellated
   (AP242 `TESSELLATED_*`) data are ignored.

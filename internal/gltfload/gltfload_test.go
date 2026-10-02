@@ -14,10 +14,10 @@ func TestLoadCube(t *testing.T) {
 	idx := []uint16{0, 1, 2, 0, 2, 3}
 	attrs := gltf.PrimitiveAttributes{gltf.POSITION: modeler.WritePosition(doc, pos)}
 	doc.Meshes = []*gltf.Mesh{{Name: "quad", Primitives: []*gltf.Primitive{{
-		Indices:    gltf.Index(modeler.WriteIndices(doc, idx)),
+		Indices:    new(modeler.WriteIndices(doc, idx)),
 		Attributes: attrs,
 	}}}}
-	doc.Nodes = []*gltf.Node{{Name: "Quad", Mesh: gltf.Index(0), Translation: [3]float64{0, 2, 0}}}
+	doc.Nodes = []*gltf.Node{{Name: "Quad", Mesh: new(0), Translation: [3]float64{0, 2, 0}}}
 	doc.Scenes[0].Nodes = append(doc.Scenes[0].Nodes, 0)
 	path := filepath.Join(t.TempDir(), "quad.glb")
 	if err := gltf.SaveBinary(doc, path); err != nil {

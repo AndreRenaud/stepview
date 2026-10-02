@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 )
 
@@ -363,8 +364,8 @@ func tessellateCurved(surf Surface, sense bool, loops [][]Vec3, prm tessParams, 
 		us, _ := surf.GridLines(prm.tol, prm.maxAngle, UVBox{math.Min(s, ue), math.Max(s, ue), box.V0, box.V1})
 		poly = append(poly, bpt{UV{ue, vb}, surf.Eval(ue, vb)})
 		if k > 0 {
-			for i := len(us) - 1; i >= 0; i-- {
-				poly = append(poly, bpt{UV{us[i], vb}, surf.Eval(us[i], vb)})
+			for _, u := range slices.Backward(us) {
+				poly = append(poly, bpt{UV{u, vb}, surf.Eval(u, vb)})
 			}
 		} else {
 			for _, u := range us {
@@ -437,12 +438,12 @@ func domainRect(surf Surface, u0, u1, v0, v1 float64, prm tessParams) []bpt {
 		add(u1, v)
 	}
 	add(u1, v1)
-	for i := len(us) - 1; i >= 0; i-- {
-		add(us[i], v1)
+	for _, u := range slices.Backward(us) {
+		add(u, v1)
 	}
 	add(u0, v1)
-	for i := len(vs) - 1; i >= 0; i-- {
-		add(u0, vs[i])
+	for _, v := range slices.Backward(vs) {
+		add(u0, v)
 	}
 	return out
 }
@@ -532,7 +533,7 @@ func cutLoopAt(l []bpt, k int, s, period float64) ([]bpt, bool) {
 	copy(ext, l)
 	ext[n] = l[0]
 	ext[n].uv.U += float64(k) * period
-	for i := 0; i < n; i++ {
+	for i := range n {
 		a, b := ext[i], ext[i+1]
 		lo, hi := math.Min(a.uv.U, b.uv.U), math.Max(a.uv.U, b.uv.U)
 		m := math.Ceil((lo - s) / period)
@@ -727,7 +728,7 @@ func triangulate(surf Surface, fixedNormal Vec3, polys [][]bpt, sense *bool, su,
 	inside := c.inside()
 	if curved {
 		// Refine triangles whose centroid deviates from the surface.
-		for pass := 0; pass < 6; pass++ {
+		for range 6 {
 			var add []UV
 			for t, in := range inside {
 				if !in {

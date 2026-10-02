@@ -86,7 +86,7 @@ func (b *benchmark) tick(v *view3D) bool {
 		b.samples++
 	}
 	if b.ticks >= 240 {
-		log.Printf("benchmark: average %.1f FPS, min %.1f FPS (chunks=%d)", b.sumFPS/float64(b.samples), b.minFPS, len(v.doc.chunks))
+		log.Printf("benchmark: average %.1f FPS, min %.1f FPS (%d triangles)", b.sumFPS/float64(b.samples), b.minFPS, v.doc.visibleTris)
 		return true
 	}
 	return false
@@ -97,7 +97,7 @@ func (b *benchmark) tick(v *view3D) bool {
 // tree node N), "center:N" (as if node N were double-clicked), "select:N",
 // "zoom:F" (scale the camera distance) and "wire" (switch to wireframe).
 func (r *Root) runScript(context *guigui.Context, script string) {
-	for _, act := range strings.Split(script, ",") {
+	for act := range strings.SplitSeq(script, ",") {
 		switch {
 		case act == "pick":
 			c := r.view.viewSize.Div(2)

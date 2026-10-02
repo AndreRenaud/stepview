@@ -97,8 +97,8 @@ func (m Affine) ApplyNormal(n Vec3) Vec3 {
 // Mul returns m∘n (apply n first, then m).
 func (m Affine) Mul(n Affine) Affine {
 	var r Affine
-	for i := 0; i < 3; i++ {
-		for j := 0; j < 3; j++ {
+	for i := range 3 {
+		for j := range 3 {
 			r.R[i][j] = m.R[i][0]*n.R[0][j] + m.R[i][1]*n.R[1][j] + m.R[i][2]*n.R[2][j]
 		}
 	}
@@ -187,7 +187,7 @@ func (b Box) Transform(m Affine) Box {
 		return b
 	}
 	out := EmptyBox()
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		p := Vec3{b.Min.X, b.Min.Y, b.Min.Z}
 		if i&1 != 0 {
 			p.X = b.Max.X

@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -648,8 +649,8 @@ func (l *loader) solidName(j *solidJob, i int) string {
 
 func isIdentity(a Affine) bool {
 	id := Identity()
-	for i := 0; i < 3; i++ {
-		for k := 0; k < 3; k++ {
+	for i := range 3 {
+		for k := range 3 {
 			if math.Abs(a.R[i][k]-id.R[i][k]) > 1e-12 {
 				return false
 			}
@@ -1086,9 +1087,7 @@ func parallel(n, workers int, fn func(i int)) {
 	var next atomic.Int64
 	var wg sync.WaitGroup
 	for w := 0; w < min(workers, n); w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				i := int(next.Add(1)) - 1
 				if i >= n {
@@ -1096,7 +1095,7 @@ func parallel(n, workers int, fn func(i int)) {
 				}
 				fn(i)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -1300,8 +1299,8 @@ func (l *loader) tessFace(ft *faceTask, edgePts map[int][]Vec3, prm tessParams) 
 						pts = append(pts, p)
 					}
 				} else {
-					for k := len(ep) - 1; k >= 0; k-- {
-						p := ep[k]
+					for k, p := range slices.Backward(ep) {
+
 						if k == len(ep)-1 && len(pts) > 0 && pts[len(pts)-1].Dist(p) < prm.tol*1e-3 {
 							continue
 						}

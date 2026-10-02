@@ -221,7 +221,7 @@ func (c *BSplineCurve) Project(p Vec3) float64 {
 }
 
 func (c *BSplineCurve) refine(p Vec3, t float64) float64 {
-	for it := 0; it < 20; it++ {
+	for range 20 {
 		q, d := c.EvalD(t)
 		r := q.Sub(p)
 		den := d.Dot(d)
@@ -272,7 +272,7 @@ func newBSplineSurface(pu, pv int, ctrl [][]Vec3, w [][]float64, UK, VK []float6
 	if w != nil {
 		s.W = make([]float64, nu*nv)
 	}
-	for i := 0; i < nu; i++ {
+	for i := range nu {
 		if len(ctrl[i]) != nv {
 			return nil, errors.New("ragged control net")
 		}
@@ -484,7 +484,7 @@ func (s *BSplineSurface) newton(p Vec3, uv UV) (UV, float64) {
 		v = math.Max(s.v0, math.Min(s.v1, v))
 	}
 	var dist float64
-	for it := 0; it < 30; it++ {
+	for range 30 {
 		q, du, dv := s.Derivs(u, v)
 		r := q.Sub(p)
 		dist = r.Len()

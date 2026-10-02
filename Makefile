@@ -2,6 +2,7 @@
 #
 #   make              build bin/stepview and bin/stepinfo
 #   make test         run the tests
+#   make check        format, modernize (go fix) and vet the code
 #   make app          build build/StepView.app
 #   make install      copy the app bundle into /Applications
 #   make universal    build the app bundle for both arm64 and amd64
@@ -13,6 +14,8 @@ APP_NAME    := StepView
 BUNDLE_ID   ?= com.github.andrerenaud.stepview
 # Architectures in the bundle's executable; more than one makes a universal binary.
 ARCHS       ?= $(shell $(GO) env GOARCH)
+# Oldest macOS the app runs on; Go 1.27 itself needs macOS 13.
+MACOS_MIN   ?= 13.0
 # Square image, at least 1024x1024, for the app icon.
 ICON        ?= STPViewer.jpeg
 # "-" signs ad hoc; set a "Developer ID Application: ..." identity to distribute.
@@ -25,28 +28,36 @@ APP   := $(BUILD)/$(APP_NAME).app
 
 GO_SRC := go.mod go.sum $(shell find . \( -name '*.go' -o -name '*.m' \) -not -path './$(BUILD)/*')
 
-.PHONY: all build test vet app install universal clean
+.PHONY: all build test check app install universal clean
 
 all: build
 
 build: $(BIN)/stepview $(BIN)/stepinfo
 
-$(BIN)/stepview: $(GO_SRC)
+$(BIN)/stepview: $(GO_SRC) | check
 	$(GO) build -o $@ .
 
-$(BIN)/stepinfo: $(GO_SRC)
+$(BIN)/stepinfo: $(GO_SRC) | check
 	$(GO) build -o $@ ./cmd/stepinfo
 
-test:
+test: check
 	$(GO) test ./...
 
-vet:
+# Runs before every build and test: rewrites the code with gofmt and go fix
+# (which applies the modernize fixers), then vets it.
+check:
+	gofmt -l -w .
+	$(GO) fix ./...
 	$(GO) vet ./...
 
 # One executable per architecture. cgo is needed for the native file dialog;
 # Apple's clang targets either architecture, so no cross toolchain is needed.
-$(BUILD)/darwin-%/stepview: $(GO_SRC)
-	CGO_ENABLED=1 GOOS=darwin GOARCH=$* $(GO) build -trimpath -ldflags='-s -w' -o $@ .
+# Without an explicit minimum, clang targets the macOS it runs on. (Go's build
+# cache keys on CGO_*FLAGS but not MACOSX_DEPLOYMENT_TARGET.)
+$(BUILD)/darwin-%/stepview: $(GO_SRC) | check
+	CGO_ENABLED=1 GOOS=darwin GOARCH=$* \
+	CGO_CFLAGS='-O2 -g -mmacosx-version-min=$(MACOS_MIN)' CGO_LDFLAGS='-O2 -g -mmacosx-version-min=$(MACOS_MIN)' \
+		$(GO) build -trimpath -ldflags='-s -w' -o $@ .
 
 EXES := $(foreach a,$(ARCHS),$(BUILD)/darwin-$(a)/stepview)
 
@@ -66,7 +77,7 @@ app: $(EXES) $(BUILD)/stepview.icns macos/Info.plist.in
 	lipo -create -output $(APP)/Contents/MacOS/stepview $(EXES)
 	cp $(BUILD)/stepview.icns $(APP)/Contents/Resources/stepview.icns
 	sed -e 's/@APP_NAME@/$(APP_NAME)/g' -e 's/@BUNDLE_ID@/$(BUNDLE_ID)/g' \
-		-e 's/@VERSION@/$(VERSION)/g' macos/Info.plist.in > $(APP)/Contents/Info.plist
+		-e 's/@VERSION@/$(VERSION)/g' -e 's/@MACOS_MIN@/$(MACOS_MIN)/g' macos/Info.plist.in > $(APP)/Contents/Info.plist
 	plutil -lint -s $(APP)/Contents/Info.plist
 	printf 'APPL????' > $(APP)/Contents/PkgInfo
 	codesign --force --sign '$(CODESIGN_ID)' $(APP)

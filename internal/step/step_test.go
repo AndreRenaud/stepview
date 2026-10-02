@@ -123,12 +123,12 @@ func checkMesh(t *testing.T, name string, m *Mesh) {
 			t.Fatalf("%s: index %d out of range", name, i)
 		}
 	}
-	for i := 0; i < nv; i++ {
+	for i := range nv {
 		n := Vec3{float64(m.Normals[i*3]), float64(m.Normals[i*3+1]), float64(m.Normals[i*3+2])}
 		if l := n.Len(); math.IsNaN(l) || math.Abs(l-1) > 1e-3 {
 			t.Fatalf("%s: vertex %d normal length %g", name, i, l)
 		}
-		for k := 0; k < 3; k++ {
+		for k := range 3 {
 			if v := float64(m.Positions[i*3+k]); math.IsNaN(v) || math.IsInf(v, 0) {
 				t.Fatalf("%s: vertex %d has invalid position", name, i)
 			}
@@ -220,7 +220,7 @@ func TestWatertight(t *testing.T) {
 				}
 				idx := n.Mesh.Indices
 				for i := 0; i+2 < len(idx); i += 3 {
-					for k := 0; k < 3; k++ {
+					for k := range 3 {
 						count[edge(p(idx[i+k]), p(idx[i+(k+1)%3]))]++
 					}
 				}

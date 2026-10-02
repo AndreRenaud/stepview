@@ -17,29 +17,18 @@ func loadDoc(t *testing.T, name string) *document {
 	return newDocument(path, m)
 }
 
-func chunkTriangles(d *document) int {
-	n := 0
-	for _, c := range d.chunks {
-		if c.model != nil {
-			n += len(c.model.Mesh().Triangles)
-		}
-	}
-	return n
+func visibleTriangles(d *document) int {
+	return d.visibleTris
 }
 
-func TestDocumentChunks(t *testing.T) {
+func TestDocumentGeometry(t *testing.T) {
 	d := loadDoc(t, "as1_pe.stp")
-	if got := chunkTriangles(d); got != d.triangles {
-		t.Fatalf("chunks hold %d triangles, want %d", got, d.triangles)
+	if got := visibleTriangles(d); got != d.triangles {
+		t.Fatalf("%d triangles to draw, want %d", got, d.triangles)
 	}
-	for _, c := range d.chunks {
-		for i, a := range c.entries {
-			for _, b := range c.entries[i+1:] {
-				if a.inst != b.inst && boxesIntersect(d.insts[a.inst].bounds, d.insts[b.inst].bounds) {
-					t.Errorf("chunk mixes overlapping instances %d and %d", a.inst, b.inst)
-				}
-			}
-		}
+	last := d.insts[len(d.insts)-1]
+	if n := last.vert0 + len(last.mesh.Positions)/3; n != len(d.verts) {
+		t.Fatalf("instances cover %d vertices, have %d", n, len(d.verts))
 	}
 }
 
@@ -59,7 +48,7 @@ func TestDocumentHideAndSelect(t *testing.T) {
 		plateTris += len(d.insts[ii].mesh.Indices) / 3
 	}
 	d.setHidden(plate, true)
-	if got := chunkTriangles(d); got != d.triangles-plateTris {
+	if got := visibleTriangles(d); got != d.triangles-plateTris {
 		t.Errorf("after hiding: %d triangles, want %d", got, d.triangles-plateTris)
 	}
 	// Hidden geometry cannot be picked.
@@ -68,12 +57,16 @@ func TestDocumentHideAndSelect(t *testing.T) {
 		t.Error("picked a hidden node")
 	}
 	d.setHidden(plate, false)
-	if got := chunkTriangles(d); got != d.triangles {
+	if got := visibleTriangles(d); got != d.triangles {
 		t.Errorf("after showing: %d triangles, want %d", got, d.triangles)
 	}
+	before := d.verts[d.insts[d.nodes[plate].insts[0]].vert0]
 	d.setSelected(0)
 	if !d.isSelected(plate) {
 		t.Error("selecting the root should select its descendants")
+	}
+	if d.verts[d.insts[d.nodes[plate].insts[0]].vert0] == before {
+		t.Error("selection did not change the colour")
 	}
 }
 

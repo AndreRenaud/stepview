@@ -222,7 +222,7 @@ func Parse(data []byte) (*File, error) {
 	chunk := (len(records) + workers - 1) / workers
 	var wg sync.WaitGroup
 	errs := make([]error, workers)
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		lo := w * chunk
 		hi := min(lo+chunk, len(records))
 		if lo >= hi {

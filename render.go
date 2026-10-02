@@ -1,0 +1,428 @@
+package main
+
+import (
+	"image"
+	"math"
+	"runtime"
+	"slices"
+	"sync"
+	"sync/atomic"
+
+	"github.com/hajimehoshi/ebiten/v2"
+
+	"github.com/AndreRenaud/stepview/internal/step"
+)
+
+// The renderer draws all visible triangles with a depth test, although
+// Ebitengine has no depth buffer. Each vertex carries its inverse depth,
+// which (unlike depth itself) interpolates linearly across a triangle on
+// screen. The nearest surface's 24-bit inverse depth is found one byte at a
+// time, in three passes that draw every triangle into an 8-bit image with
+// a "max" blend: the first pass keeps the highest top byte, the second the
+// highest middle byte among fragments matching that top byte, and the third
+// likewise for the low byte. A final pass draws the colour of the fragments
+// whose depth equals the stored one. Every pass sees identical vertices, so
+// a fragment's interpolated depth is identical in each of them.
+//
+// Projection runs on the CPU, spread over all cores.
+
+const depthShaderSource = `//kage:unit pixels
+
+package main
+
+var Stage int
+
+func Fragment(dstPos vec4, srcPos vec2, color vec4, custom vec4) vec4 {
+	q := floor(clamp(custom.x, 0, 1) * 16777215)
+	hi := floor(q / 65536)
+	q -= hi * 65536
+	mid := floor(q / 256)
+	lo := q - mid*256
+
+	if Stage == 0 {
+		return vec4(hi / 255)
+	}
+	p := dstPos.xy - imageDstOrigin()
+	if abs(imageSrc0UnsafeAt(p+imageSrc0Origin()).r*255-hi) > 0.5 {
+		return vec4(0)
+	}
+	if Stage == 1 {
+		return vec4(mid / 255)
+	}
+	if abs(imageSrc1UnsafeAt(p+imageSrc1Origin()).r*255-mid) > 0.5 {
+		return vec4(0)
+	}
+	if Stage == 2 {
+		return vec4(lo / 255)
+	}
+	if abs(imageSrc2UnsafeAt(p+imageSrc2Origin()).r*255-lo) > 0.5 {
+		return vec4(0)
+	}
+	return vec4(color.rgb, 1)
+}
+`
+
+var maxBlend = ebiten.Blend{
+	BlendFactorSourceRGB:        ebiten.BlendFactorOne,
+	BlendFactorSourceAlpha:      ebiten.BlendFactorOne,
+	BlendFactorDestinationRGB:   ebiten.BlendFactorOne,
+	BlendFactorDestinationAlpha: ebiten.BlendFactorOne,
+	BlendOperationRGB:           ebiten.BlendOperationMax,
+	BlendOperationAlpha:         ebiten.BlendOperationMax,
+}
+
+// camera is the orbit's perspective projection onto a w×h pixel viewport.
+type camera struct {
+	eye             step.Vec3
+	right, up, back step.Vec3 // view basis; the camera looks along -back
+	w, h            int
+	focal           float64 // pixels per unit of tan(angle off axis)
+}
+
+func (o *orbit) camera(w, h int) camera {
+	right, up, back := o.basis()
+	return camera{
+		eye: o.eye(), right: right, up: up, back: back,
+		w: w, h: h,
+		focal: float64(h) / 2 / math.Tan(o.fov/2*math.Pi/180),
+	}
+}
+
+// viewMatrix returns the map from an instance's local coordinates to view
+// coordinates (x right, y up, z the distance in front of the camera), as
+// rows of a 3×4 matrix.
+func (c *camera) viewMatrix(world step.Affine) [3][4]float32 {
+	var m [3][4]float32
+	for r, axis := range [3]step.Vec3{c.right, c.up, c.back.Scale(-1)} {
+		for j := range 3 {
+			m[r][j] = float32(axis.X*world.R[0][j] + axis.Y*world.R[1][j] + axis.Z*world.R[2][j])
+		}
+		m[r][3] = float32(axis.Dot(world.T.Sub(c.eye)))
+	}
+	return m
+}
+
+// ray returns the picking ray through a viewport pixel.
+func (c *camera) ray(px, py float64) (origin, dir step.Vec3) {
+	x := (px - float64(c.w)/2) / c.focal
+	y := (float64(c.h)/2 - py) / c.focal
+	return c.eye, c.right.Scale(x).Add(c.up.Scale(y)).Sub(c.back).Norm()
+}
+
+type renderer struct {
+	depth  [3]*ebiten.Image
+	color  *ebiten.Image
+	shader *ebiten.Shader
+
+	// The triangles that survive culling and their vertices, rebuilt every
+	// frame, with scratch space indexed like the document's vertices and
+	// the concatenation of its instances' indices.
+	verts   []ebiten.Vertex
+	indices []uint32
+	remap   []int32
+	kept    []uint32
+	idxOff  []int // per instance: its offset in kept
+	doc     *document
+	work    []instanceWork
+}
+
+// instanceWork holds per-frame results for one visible instance.
+type instanceWork struct {
+	near, far  float32
+	used, kept int             // vertices and indices surviving culling
+	extraV     []ebiten.Vertex // vertices made by clipping at the near plane
+	extraI     []uint32        // triangles using them, numbered as in kept but with extraFlag for extraV
+	vOff, iOff int             // offsets in the output
+}
+
+// extraFlag marks an index into instanceWork.extraV.
+const extraFlag = 1 << 31
+
+func (r *renderer) resize(w, h int) {
+	if r.color != nil && r.color.Bounds().Dx() == w && r.color.Bounds().Dy() == h {
+		return
+	}
+	opt := &ebiten.NewImageOptions{Unmanaged: true}
+	for i := range r.depth {
+		if r.depth[i] != nil {
+			r.depth[i].Deallocate()
+		}
+		r.depth[i] = ebiten.NewImageWithOptions(image.Rect(0, 0, w, h), opt)
+	}
+	if r.color != nil {
+		r.color.Deallocate()
+	}
+	r.color = ebiten.NewImageWithOptions(image.Rect(0, 0, w, h), opt)
+}
+
+// render draws the document's visible triangles into r.color.
+func (r *renderer) render(d *document, c *camera) {
+	if r.shader == nil {
+		s, err := ebiten.NewShader([]byte(depthShaderSource))
+		if err != nil {
+			panic(err)
+		}
+		r.shader = s
+	}
+	r.resize(c.w, c.h)
+	for _, img := range r.depth {
+		img.Clear()
+	}
+	r.color.Clear()
+	verts, idx := r.project(d, c)
+	if len(idx) == 0 {
+		return
+	}
+	op := &ebiten.DrawTrianglesShaderOptions{Blend: maxBlend}
+	for stage, dst := range []*ebiten.Image{r.depth[0], r.depth[1], r.depth[2], r.color} {
+		if stage == 3 {
+			op.Blend = ebiten.BlendSourceOver
+		}
+		op.Uniforms = map[string]any{"Stage": stage}
+		dst.DrawTrianglesShader32(verts, idx, r.shader, op)
+		if stage < 3 {
+			op.Images[stage] = r.depth[stage]
+		}
+	}
+}
+
+// prepare sizes the scratch space for a document.
+func (r *renderer) prepare(d *document) {
+	if r.doc == d {
+		return
+	}
+	r.doc = d
+	r.idxOff = make([]int, len(d.insts))
+	n := 0
+	for i, in := range d.insts {
+		r.idxOff[i] = n
+		n += len(in.mesh.Indices)
+	}
+	r.verts = make([]ebiten.Vertex, len(d.verts))
+	r.indices = make([]uint32, n)
+	r.remap = make([]int32, len(d.verts))
+	r.kept = make([]uint32, n)
+}
+
+// project computes the screen position and depth of the visible
+// instances' vertices, and returns the vertices and triangles to draw: those
+// facing the camera, on screen and in front of the near plane.
+func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
+	if len(d.visible) == 0 {
+		return nil, nil
+	}
+	r.prepare(d)
+	m := c.viewMatrix(step.Identity())
+	cx, cy, f := float32(c.w)/2, float32(c.h)/2, float32(c.focal)
+	w, h := float32(c.w), float32(c.h)
+	pos, verts := d.pos, d.verts
+	r.work = slices.Grow(r.work[:0], len(d.visible))[:len(d.visible)]
+
+	// Screen positions, with the view position in Custom1-3: x, y and depth.
+	parallelEach(len(d.visible), func(k int) {
+		in := &d.insts[d.visible[k]]
+		mn, mx := float32(math.Inf(1)), float32(math.Inf(-1))
+		for i := in.vert0; i < in.vert0+len(in.mesh.Positions)/3; i++ {
+			x, y, z := pos[i*3], pos[i*3+1], pos[i*3+2]
+			vx := m[0][0]*x + m[0][1]*y + m[0][2]*z + m[0][3]
+			vy := m[1][0]*x + m[1][1]*y + m[1][2]*z + m[1][3]
+			vz := m[2][0]*x + m[2][1]*y + m[2][2]*z + m[2][3]
+			v := &verts[i]
+			v.Custom1, v.Custom2, v.Custom3 = vx, vy, vz
+			if vz > 0 {
+				v.DstX = cx + f*vx/vz
+				v.DstY = cy - f*vy/vz
+			}
+			mn = min(mn, vz)
+			mx = max(mx, vz)
+		}
+		r.work[k] = instanceWork{near: mn, far: mx}
+	})
+	near, far := float32(math.Inf(1)), float32(math.Inf(-1))
+	for _, wk := range r.work {
+		near, far = min(near, wk.near), max(far, wk.far)
+	}
+	if far <= 0 {
+		return nil, nil
+	}
+	// Geometry closer than clipNear is cut away; inverse depth is spread
+	// over the remaining range.
+	clipNear := far * 1e-3
+	near = max(near, clipNear)
+	if far-near < far*1e-6 {
+		far = near * (1 + 1e-6)
+	}
+	scale := 1 / (1/near - 1/far)
+	offset := 1 / far
+	encode := func(z float32) float32 { return (1/z - offset) * scale }
+	// facing reports whether a screen triangle faces the camera and touches
+	// the screen. Front faces are counter-clockwise seen from outside, so
+	// clockwise on screen, where y points down.
+	facing := func(va, vb, vc *ebiten.Vertex) bool {
+		return (vb.DstX-va.DstX)*(vc.DstY-va.DstY)-(vb.DstY-va.DstY)*(vc.DstX-va.DstX) < 0 &&
+			max(va.DstX, vb.DstX, vc.DstX) >= 0 && min(va.DstX, vb.DstX, vc.DstX) <= w &&
+			max(va.DstY, vb.DstY, vc.DstY) >= 0 && min(va.DstY, vb.DstY, vc.DstY) <= h
+	}
+
+	// Encode the depths and cull the triangles, numbering the vertices that
+	// are still needed.
+	parallelEach(len(d.visible), func(k int) {
+		ii := d.visible[k]
+		in := &d.insts[ii]
+		mesh := in.mesh
+		base := in.vert0
+		iv := verts[base : base+len(mesh.Positions)/3]
+		for i := range iv {
+			if z := iv[i].Custom3; z >= clipNear {
+				iv[i].Custom0 = encode(z)
+			}
+		}
+		remap := r.remap[base : base+len(iv)]
+		for i := range remap {
+			remap[i] = -1
+		}
+		wk := &r.work[k]
+		use := func(x uint32) {
+			if remap[x] < 0 {
+				remap[x] = int32(wk.used)
+				wk.used++
+			}
+		}
+		kept := r.kept[r.idxOff[ii]:]
+		for t := 0; t+2 < len(mesh.Indices); t += 3 {
+			tri := [3]uint32{mesh.Indices[t], mesh.Indices[t+1], mesh.Indices[t+2]}
+			va, vb, vc := &iv[tri[0]], &iv[tri[1]], &iv[tri[2]]
+			if va.Custom3 < clipNear || vb.Custom3 < clipNear || vc.Custom3 < clipNear {
+				wk.clip(tri, iv, clipNear, func(x, y float32) (float32, float32) {
+					return cx + f*x/clipNear, cy - f*y/clipNear
+				}, encode(clipNear), facing, use)
+				continue
+			}
+			if !facing(va, vb, vc) {
+				continue
+			}
+			for _, x := range tri {
+				use(x)
+			}
+			copy(kept[wk.kept:], tri[:])
+			wk.kept += 3
+		}
+	})
+
+	// Pack the survivors.
+	nv, ni := 0, 0
+	for k := range r.work {
+		wk := &r.work[k]
+		wk.vOff, wk.iOff = nv, ni
+		nv += wk.used + len(wk.extraV)
+		ni += wk.kept + len(wk.extraI)
+	}
+	parallelEach(len(d.visible), func(k int) {
+		ii := d.visible[k]
+		in := &d.insts[ii]
+		wk := &r.work[k]
+		base := in.vert0
+		remap := r.remap[base : base+len(in.mesh.Positions)/3]
+		for i, j := range remap {
+			if j >= 0 {
+				r.verts[wk.vOff+int(j)] = verts[base+i]
+			}
+		}
+		copy(r.verts[wk.vOff+wk.used:], wk.extraV)
+		out := r.indices[wk.iOff:]
+		for t, x := range r.kept[r.idxOff[ii] : r.idxOff[ii]+wk.kept] {
+			out[t] = uint32(wk.vOff + int(remap[x]))
+		}
+		out = out[wk.kept:]
+		for t, x := range wk.extraI {
+			if x&extraFlag != 0 {
+				out[t] = uint32(wk.vOff + wk.used + int(x&^extraFlag))
+			} else {
+				out[t] = uint32(wk.vOff + int(remap[x]))
+			}
+		}
+	})
+	return r.verts[:nv], r.indices[:ni]
+}
+
+// clip cuts a triangle crossing the near plane at depth zn and keeps the
+// part in front: a triangle or a quadrilateral. New vertices interpolate
+// the view position and colour along the cut edges.
+func (wk *instanceWork) clip(tri [3]uint32, iv []ebiten.Vertex, zn float32,
+	project func(x, y float32) (float32, float32), depth float32,
+	facing func(a, b, c *ebiten.Vertex) bool, use func(uint32)) {
+	type corner struct {
+		v   ebiten.Vertex
+		ref uint32 // index into iv, or extraFlag for a new vertex
+	}
+	var poly [4]corner
+	n := 0
+	for k := range 3 {
+		i, j := &iv[tri[k]], &iv[tri[(k+1)%3]]
+		if i.Custom3 >= zn {
+			poly[n] = corner{*i, tri[k]}
+			n++
+		}
+		if (i.Custom3 >= zn) != (j.Custom3 >= zn) {
+			t := (zn - i.Custom3) / (j.Custom3 - i.Custom3)
+			lerp := func(a, b float32) float32 { return a + (b-a)*t }
+			v := ebiten.Vertex{
+				ColorR: lerp(i.ColorR, j.ColorR), ColorG: lerp(i.ColorG, j.ColorG), ColorB: lerp(i.ColorB, j.ColorB), ColorA: 1,
+				Custom0: depth,
+				Custom1: lerp(i.Custom1, j.Custom1), Custom2: lerp(i.Custom2, j.Custom2), Custom3: zn,
+			}
+			v.DstX, v.DstY = project(v.Custom1, v.Custom2)
+			poly[n] = corner{v, extraFlag}
+			n++
+		}
+	}
+	add := func(c *corner) uint32 {
+		switch {
+		case c.ref&extraFlag == 0:
+			use(c.ref)
+		case c.ref == extraFlag: // not yet added
+			c.ref |= uint32(len(wk.extraV))
+			wk.extraV = append(wk.extraV, c.v)
+		}
+		return c.ref
+	}
+	for k := 1; k+1 < n; k++ {
+		a, b, c := &poly[0], &poly[k], &poly[k+1]
+		if facing(&a.v, &b.v, &c.v) {
+			wk.extraI = append(wk.extraI, add(a), add(b), add(c))
+		}
+	}
+}
+
+// parallelFor calls f on contiguous sub-ranges of [0, n), concurrently.
+func parallelFor(n int, f func(lo, hi int)) {
+	chunks := min(runtime.GOMAXPROCS(0), max(1, n/4096))
+	per := (n + chunks - 1) / chunks
+	var wg sync.WaitGroup
+	for lo := 0; lo < n; lo += per {
+		hi := min(n, lo+per)
+		wg.Go(func() {
+			f(lo, hi)
+		})
+	}
+	wg.Wait()
+}
+
+// parallelEach calls f for each of [0, n), on all cores; suited to items of
+// very different cost.
+func parallelEach(n int, f func(i int)) {
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range min(runtime.GOMAXPROCS(0), n) {
+		wg.Go(func() {
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= n {
+					return
+				}
+				f(i)
+			}
+		})
+	}
+	wg.Wait()
+}

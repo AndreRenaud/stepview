@@ -44,8 +44,8 @@ func main() {
 		counts := map[string]int{}
 		for _, w := range m.Warnings {
 			k := w
-			if i := strings.Index(w, ": "); i >= 0 {
-				k = w[i+2:]
+			if _, after, ok := strings.Cut(w, ": "); ok {
+				k = after
 			}
 			counts[k]++
 		}
@@ -128,7 +128,7 @@ func collect(n *step.Node, xf step.Affine, out *[]tri) {
 	if m := n.Mesh; m != nil {
 		for i := 0; i+2 < len(m.Indices); i += 3 {
 			var t tri
-			for k := 0; k < 3; k++ {
+			for k := range 3 {
 				v := m.Indices[i+k]
 				p := step.Vec3{X: float64(m.Positions[v*3]), Y: float64(m.Positions[v*3+1]), Z: float64(m.Positions[v*3+2])}
 				nn := step.Vec3{X: float64(m.Normals[v*3]), Y: float64(m.Normals[v*3+1]), Z: float64(m.Normals[v*3+2])}
@@ -180,7 +180,7 @@ func render(m *step.Model, size int, yaw, pitch float64) *image.RGBA {
 	light := fwd.Scale(-1).Add(up.Scale(0.5)).Add(right.Scale(-0.3)).Norm()
 	for _, t := range tris {
 		var sx, sy, sz [3]float64
-		for k := 0; k < 3; k++ {
+		for k := range 3 {
 			p := t.p[k]
 			sx[k] = (p.Dot(right)-cx)*scale + float64(size)/2
 			sy[k] = float64(size)/2 - (p.Dot(up)-cy)*scale

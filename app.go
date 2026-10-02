@@ -470,9 +470,7 @@ func (d *document) showAll() {
 	if !changed {
 		return
 	}
-	for _, c := range d.chunks {
-		d.rebuildChunk(c)
-	}
+	d.updateVisible()
 	d.gen++
 }
 

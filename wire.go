@@ -4,7 +4,6 @@ import (
 	"math"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/solarlune/tetra3d"
 
 	"github.com/AndreRenaud/stepview/internal/step"
 )
@@ -38,7 +37,7 @@ func featureEdges(m *step.Mesh) []uint32 {
 		return len(m.Indices)
 	}
 	nFaces := max(1, len(m.FaceStarts))
-	for f := 0; f < nFaces; f++ {
+	for f := range nFaces {
 		start := 0
 		if f < len(m.FaceStarts) {
 			start = int(m.FaceStarts[f])
@@ -51,7 +50,7 @@ func featureEdges(m *step.Mesh) []uint32 {
 				p[k] = step.Vec3{X: float64(q[0]), Y: float64(q[1]), Z: float64(q[2])}
 			}
 			n := p[1].Sub(p[0]).Cross(p[2].Sub(p[0])).Norm()
-			for k := 0; k < 3; k++ {
+			for k := range 3 {
 				a, b := idx[k], idx[(k+1)%3]
 				pa, pb := pos(a), pos(b)
 				if pa[0] > pb[0] || pa[0] == pb[0] && (pa[1] > pb[1] || pa[1] == pb[1] && pa[2] > pb[2]) {
@@ -94,13 +93,11 @@ func (d *document) edges(m *step.Mesh) []uint32 {
 	return e
 }
 
-// renderWireframe draws the model edges of all visible instances into dst,
-// using the camera's projection.
-func (v *view3D) renderWireframe(dst *ebiten.Image, lineWidth float32, dark bool) {
+// renderWireframe draws the model edges of all visible instances into dst.
+func (v *view3D) renderWireframe(dst *ebiten.Image, c *camera, lineWidth float32, dark bool) {
 	d := v.doc
-	w, h := v.camera.Size()
-	fw, fh := float32(w), float32(h)
-	vp := v.camera.ViewMatrix().Mult(v.camera.Projection())
+	fw, fh := float32(c.w), float32(c.h)
+	cx, cy, f := fw/2, fh/2, float32(c.focal)
 	line := [3]float32{0.12, 0.13, 0.16}
 	if dark {
 		line = [3]float32{0.85, 0.87, 0.9}
@@ -123,24 +120,17 @@ func (v *view3D) renderWireframe(dst *ebiten.Image, lineWidth float32, dark bool
 		if d.isSelected(inst.node) {
 			col = highlightColour
 		}
-		// Combine the instance transform, the Z-up to Y-up conversion and the
-		// view-projection into one matrix (row-vector convention).
-		wr := inst.world
-		var mw tetra3d.Matrix4
-		for i := 0; i < 3; i++ {
-			c := toT(step.Vec3{X: wr.R[0][i], Y: wr.R[1][i], Z: wr.R[2][i]})
-			mw[i] = [4]float32{c.X, c.Y, c.Z, 0}
-		}
-		t := toT(wr.T)
-		mw[3] = [4]float32{t.X, t.Y, t.Z, 1}
-		mvp := mw.Mult(vp)
+		mv := c.viewMatrix(inst.world)
 		m := inst.mesh
 		project := func(i uint32) (float32, float32, bool) {
-			p := mvp.MultVecW(tetra3d.Vector3{X: m.Positions[i*3], Y: m.Positions[i*3+1], Z: m.Positions[i*3+2]})
-			if p.W <= 1e-6 {
+			x, y, z := m.Positions[i*3], m.Positions[i*3+1], m.Positions[i*3+2]
+			vz := mv[2][0]*x + mv[2][1]*y + mv[2][2]*z + mv[2][3]
+			if vz <= 1e-6 {
 				return 0, 0, false
 			}
-			return p.X/p.W*fw + fw/2, p.Y/-p.W*fh + fh/2, true
+			vx := mv[0][0]*x + mv[0][1]*y + mv[0][2]*z + mv[0][3]
+			vy := mv[1][0]*x + mv[1][1]*y + mv[1][2]*z + mv[1][3]
+			return cx + f*vx/vz, cy - f*vy/vz, true
 		}
 		e := d.edges(m)
 		for k := 0; k+1 < len(e); k += 2 {
