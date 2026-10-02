@@ -95,8 +95,8 @@ func (b *benchmark) tick(v *view3D) bool {
 // runScript performs debugging actions from STEPVIEW_SCRIPT, a comma
 // separated list of "pick" (click the centre of the view), "hide:N" (hide
 // tree node N), "center:N" (as if node N were double-clicked), "select:N",
-// "zoom:F" (scale the camera distance), "wire" (switch to wireframe) and
-// "hq" (switch to high quality).
+// "zoom:F" (scale the camera distance), "wire" (switch to wireframe),
+// "hq" (switch to high quality) and "spin" (start spinning).
 func (r *Root) runScript(context *guigui.Context, script string) {
 	for act := range strings.SplitSeq(script, ",") {
 		switch {
@@ -118,6 +118,8 @@ func (r *Root) runScript(context *guigui.Context, script string) {
 			r.view.setMode(modeWireframe)
 		case act == "hq":
 			r.view.setMode(modeHighQuality)
+		case act == "spin":
+			r.view.setSpinning(true)
 		case strings.HasPrefix(act, "center:"):
 			n, _ := strconv.Atoi(strings.TrimPrefix(act, "center:"))
 			r.onDouble(context, n)

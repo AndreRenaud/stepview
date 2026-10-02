@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"math"
 	"os"
+	"time"
 
 	"github.com/guigui-gui/guigui"
 	"github.com/hajimehoshi/ebiten/v2"
@@ -29,6 +30,9 @@ const (
 // settleTicks is how long the camera must rest before the high quality
 // renderer draws at full quality.
 const settleTicks = 12
+
+// spinPeriod is the time of one turn in spin mode.
+const spinPeriod = 24 * time.Second
 
 // maxSupersampledPixels limits the view size at which the high quality
 // renderer supersamples, to bound its memory and time.
@@ -89,6 +93,9 @@ type view3D struct {
 	coarse          bool
 	renderedDark    bool // the colour mode of the last render's background
 
+	spinning bool
+	lastSpin time.Time // when the spin last advanced, or zero
+
 	orbit orbit
 
 	dragButton ebiten.MouseButton
@@ -124,6 +131,12 @@ func (v *view3D) toggleWireframe() {
 	} else {
 		v.setMode(modeWireframe)
 	}
+}
+
+// setSpinning starts or stops turning the camera around the model.
+func (v *view3D) setSpinning(on bool) {
+	v.spinning = on
+	v.lastSpin = time.Time{}
 }
 
 // centerOn pans the camera so a node's geometry is centred in the view,
@@ -211,6 +224,17 @@ func (v *view3D) cameraMoved() {
 
 func (v *view3D) Tick(context *guigui.Context, widgetBounds *guigui.WidgetBounds) error {
 	v.ticks++
+	if v.spinning && v.doc != nil {
+		now := time.Now()
+		if !v.lastSpin.IsZero() {
+			// Limit the step so that a stall does not jump the view.
+			dt := min(now.Sub(v.lastSpin), 100*time.Millisecond)
+			v.orbit.yaw -= 2 * math.Pi * dt.Seconds() / spinPeriod.Seconds()
+			v.orbit.yaw = math.Remainder(v.orbit.yaw, 2*math.Pi)
+		}
+		v.lastSpin = now
+		v.cameraMoved()
+	}
 	if v.coarse && !v.dragging && v.ticks-v.lastMove > settleTicks {
 		v.requestRender()
 	}
@@ -307,6 +331,8 @@ func (v *view3D) HandlePointingInput(context *guigui.Context, widgetBounds *guig
 			s := 1 / context.Scale()
 			switch v.dragButton {
 			case ebiten.MouseButtonLeft:
+				// Turning the model by hand takes over from spinning.
+				v.spinning = false
 				v.orbit.yaw -= float64(d.X) * 0.008 * s
 				v.orbit.pitch += float64(d.Y) * 0.008 * s
 				v.orbit.pitch = math.Max(-math.Pi/2+1e-3, math.Min(math.Pi/2-1e-3, v.orbit.pitch))

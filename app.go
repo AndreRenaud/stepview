@@ -51,6 +51,7 @@ type Root struct {
 	topButton   basicwidget.Button
 	frontButton basicwidget.Button
 	rightButton basicwidget.Button
+	spinButton  basicwidget.Button
 	showButton  basicwidget.Button
 	modeSelect  basicwidget.Select[renderMode]
 	status      basicwidget.Text
@@ -100,6 +101,7 @@ func (r *Root) WriteStateKey(context *guigui.Context, w *guigui.StateKeyWriter) 
 	w.WriteInt(r.docSerial)
 	w.WriteBool(r.loading)
 	w.WriteInt(r.treeWidth)
+	w.WriteBool(r.view.spinning)
 	if r.doc != nil {
 		w.WriteInt(r.doc.gen)
 	}
@@ -272,6 +274,7 @@ func (r *Root) Build(context *guigui.Context, adder *guigui.ChildAdder) error {
 	adder.AddWidget(&r.topButton)
 	adder.AddWidget(&r.frontButton)
 	adder.AddWidget(&r.rightButton)
+	adder.AddWidget(&r.spinButton)
 	adder.AddWidget(&r.showButton)
 	adder.AddWidget(&r.modeSelect)
 	adder.AddWidget(&r.status)
@@ -300,6 +303,10 @@ func (r *Root) Build(context *guigui.Context, adder *guigui.ChildAdder) error {
 	r.frontButton.OnDown(func(context *guigui.Context) { r.view.setView(-math.Pi/2, 0) })
 	r.rightButton.SetText("Right")
 	r.rightButton.OnDown(func(context *guigui.Context) { r.view.setView(0, 0) })
+	r.spinButton.SetText("Spin")
+	r.spinButton.SetToggleable(true)
+	r.spinButton.SetPressed(r.view.spinning)
+	r.spinButton.OnDown(func(context *guigui.Context) { r.view.setSpinning(!r.view.spinning) })
 	r.showButton.SetText("Show all")
 	r.showButton.OnDown(func(context *guigui.Context) {
 		if r.doc != nil {
@@ -320,7 +327,7 @@ func (r *Root) Build(context *guigui.Context, adder *guigui.ChildAdder) error {
 			r.view.setMode(item.Value)
 		}
 	})
-	for _, b := range []*basicwidget.Button{&r.fitButton, &r.isoButton, &r.topButton, &r.frontButton, &r.rightButton, &r.showButton} {
+	for _, b := range []*basicwidget.Button{&r.fitButton, &r.isoButton, &r.topButton, &r.frontButton, &r.rightButton, &r.spinButton, &r.showButton} {
 		context.SetEnabled(b, hasDoc)
 	}
 	context.SetEnabled(&r.modeSelect, hasDoc)
@@ -425,6 +432,7 @@ func (r *Root) Layout(context *guigui.Context, widgetBounds *guigui.WidgetBounds
 		guigui.LinearLayoutItem{Widget: &r.topButton},
 		guigui.LinearLayoutItem{Widget: &r.frontButton},
 		guigui.LinearLayoutItem{Widget: &r.rightButton},
+		guigui.LinearLayoutItem{Widget: &r.spinButton},
 		guigui.LinearLayoutItem{Size: guigui.FixedSize(u / 4)},
 		guigui.LinearLayoutItem{Widget: &r.showButton},
 		guigui.LinearLayoutItem{Widget: &r.modeSelect},
