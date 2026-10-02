@@ -17,6 +17,23 @@ import (
 
 var view3DEventPicked = guigui.GenerateEventKey()
 
+// renderMode is how the 3D view draws the model.
+type renderMode int
+
+const (
+	modeNormal renderMode = iota
+	modeWireframe
+	modeHighQuality
+)
+
+// settleTicks is how long the camera must rest before the high quality
+// renderer draws at full quality.
+const settleTicks = 12
+
+// maxSupersampledPixels limits the view size at which the high quality
+// renderer supersamples, to bound its memory and time.
+const maxSupersampledPixels = 5_000_000
+
 // orbit is a turntable camera around a target point, in model coordinates
 // (Z up).
 type orbit struct {
@@ -61,8 +78,16 @@ type view3D struct {
 	size     image.Point // size of the last render
 	wire     *ebiten.Image
 
-	wireframe bool
-	white     *ebiten.Image
+	mode       renderMode
+	lastShaded renderMode // the mode to return to from wireframe
+	white      *ebiten.Image
+
+	// ticks counts frames; lastMove is the tick of the last camera move,
+	// and coarse is set when the last high quality render was not at full
+	// quality.
+	ticks, lastMove int
+	coarse          bool
+	renderedDark    bool // the colour mode of the last render's background
 
 	orbit orbit
 
@@ -80,13 +105,25 @@ func (v *view3D) OnPicked(f func(context *guigui.Context, node int)) {
 	guigui.SetEventHandler(v, view3DEventPicked, f)
 }
 
-// setWireframe switches between shaded and wireframe rendering.
-func (v *view3D) setWireframe(on bool) {
-	if v.wireframe == on {
+// setMode changes the render mode.
+func (v *view3D) setMode(m renderMode) {
+	if v.mode == m {
 		return
 	}
-	v.wireframe = on
+	if m == modeWireframe {
+		v.lastShaded = v.mode
+	}
+	v.mode = m
 	v.requestRender()
+}
+
+// toggleWireframe switches between wireframe and the last shaded mode.
+func (v *view3D) toggleWireframe() {
+	if v.mode == modeWireframe {
+		v.setMode(v.lastShaded)
+	} else {
+		v.setMode(modeWireframe)
+	}
 }
 
 // centerOn pans the camera so a node's geometry is centred in the view,
@@ -109,7 +146,7 @@ func (v *view3D) WriteStateKey(context *guigui.Context, w *guigui.StateKeyWriter
 		w.WriteInt(len(v.doc.nodes))
 	}
 	w.WriteBool(v.doc != nil)
-	w.WriteBool(v.wireframe)
+	w.WriteInt(int(v.mode))
 }
 
 // setDocument shows a new document and frames it.
@@ -165,9 +202,48 @@ func (v *view3D) requestRender() {
 	guigui.RequestRedraw(v)
 }
 
+// cameraMoved redraws after an interactive camera change, which the high
+// quality renderer draws quickly until the camera rests.
+func (v *view3D) cameraMoved() {
+	v.lastMove = v.ticks
+	v.requestRender()
+}
+
+func (v *view3D) Tick(context *guigui.Context, widgetBounds *guigui.WidgetBounds) error {
+	v.ticks++
+	if v.coarse && !v.dragging && v.ticks-v.lastMove > settleTicks {
+		v.requestRender()
+	}
+	return nil
+}
+
+// backgroundColours returns the view's background gradient.
+func backgroundColours(dark bool) (top, bottom [3]float32) {
+	if dark {
+		return [3]float32{0.22, 0.23, 0.26}, [3]float32{0.09, 0.09, 0.11}
+	}
+	return [3]float32{0.86, 0.88, 0.92}, [3]float32{0.55, 0.58, 0.64}
+}
+
 func (v *view3D) render(context *guigui.Context, size image.Point) {
 	c := v.orbit.camera(size.X, size.Y)
-	if v.wireframe {
+	v.coarse = false
+	v.renderedDark = context.ColorMode() == ebiten.ColorModeDark
+	switch v.mode {
+	case modeNormal:
+		v.renderer.render(v.doc, &c, renderOptions{})
+	case modeHighQuality:
+		opt := renderOptions{hq: true, supersample: 1, aoRadius: float32(v.doc.bounds.Diag() * 0.012)}
+		opt.bgTop, opt.bgBottom = backgroundColours(v.renderedDark)
+		if size.X*size.Y <= maxSupersampledPixels {
+			if v.dragging || v.ticks-v.lastMove <= settleTicks {
+				v.coarse = true
+			} else {
+				opt.supersample = 2
+			}
+		}
+		v.renderer.render(v.doc, &c, opt)
+	case modeWireframe:
 		if v.wire == nil || v.wire.Bounds().Size() != size {
 			if v.wire != nil {
 				v.wire.Deallocate()
@@ -176,8 +252,6 @@ func (v *view3D) render(context *guigui.Context, size image.Point) {
 		}
 		v.wire.Clear()
 		v.renderWireframe(v.wire, &c, float32(1.2*context.Scale()), context.ColorMode() == ebiten.ColorModeDark)
-	} else {
-		v.renderer.render(v.doc, &c)
 	}
 	v.size = size
 	v.needRender = false
@@ -217,6 +291,7 @@ func (v *view3D) HandlePointingInput(context *guigui.Context, widgetBounds *guig
 		}
 		if _, wy := ebiten.Wheel(); wy != 0 && v.doc != nil {
 			v.zoom(math.Pow(0.85, wy), pos.Sub(b.Min))
+			v.cameraMoved()
 			return guigui.AbortHandlingInputByWidget(v)
 		}
 		return guigui.HandleInputResult{}
@@ -241,7 +316,7 @@ func (v *view3D) HandlePointingInput(context *guigui.Context, widgetBounds *guig
 				perPixel := 2 * v.orbit.dist * math.Tan(v.orbit.fov/2*math.Pi/180) / h
 				v.orbit.target = v.orbit.target.Sub(right.Scale(float64(d.X) * perPixel)).Add(up.Scale(float64(d.Y) * perPixel))
 			}
-			v.requestRender()
+			v.cameraMoved()
 		}
 		return guigui.AbortHandlingInputByWidget(v)
 	}
@@ -285,8 +360,8 @@ func (v *view3D) HandleButtonInput(context *guigui.Context, widgetBounds *guigui
 	case inpututil.IsKeyJustPressed(ebiten.KeyS):
 		v.fit(v.doc.selected)
 	case inpututil.IsKeyJustPressed(ebiten.KeyW):
-		v.setWireframe(!v.wireframe)
-		// Rebuild so the toolbar button reflects the new state.
+		v.toggleWireframe()
+		// Rebuild so the toolbar reflects the new state.
 		return guigui.HandleInputByWidget(v)
 	default:
 		return guigui.HandleInputResult{}
@@ -311,12 +386,13 @@ func (v *view3D) Draw(context *guigui.Context, widgetBounds *guigui.WidgetBounds
 	if v.doc == nil || b.Dx() < 2 || b.Dy() < 2 {
 		return
 	}
-	if v.needRender || v.size != b.Size() || v.renderedDoc != v.doc || v.renderedGen != v.doc.gen {
+	dark := context.ColorMode() == ebiten.ColorModeDark
+	if v.needRender || v.size != b.Size() || v.renderedDoc != v.doc || v.renderedGen != v.doc.gen || v.renderedDark != dark {
 		v.render(context, b.Size())
 	}
 	op := &ebiten.DrawImageOptions{}
 	op.GeoM.Translate(float64(b.Min.X), float64(b.Min.Y))
-	if v.wireframe {
+	if v.mode == modeWireframe {
 		dst.DrawImage(v.wire, op)
 	} else {
 		dst.DrawImage(v.renderer.color, op)
@@ -329,12 +405,7 @@ func (v *view3D) drawBackground(context *guigui.Context, dst *ebiten.Image, b im
 		v.white = ebiten.NewImage(3, 3)
 		v.white.Fill(color.White)
 	}
-	top := [3]float32{0.86, 0.88, 0.92}
-	bot := [3]float32{0.55, 0.58, 0.64}
-	if context.ColorMode() == ebiten.ColorModeDark {
-		top = [3]float32{0.22, 0.23, 0.26}
-		bot = [3]float32{0.09, 0.09, 0.11}
-	}
+	top, bot := backgroundColours(context.ColorMode() == ebiten.ColorModeDark)
 	x0, y0, x1, y1 := float32(b.Min.X), float32(b.Min.Y), float32(b.Max.X), float32(b.Max.Y)
 	vs := []ebiten.Vertex{
 		{DstX: x0, DstY: y0, SrcX: 1, SrcY: 1, ColorR: top[0], ColorG: top[1], ColorB: top[2], ColorA: 1},

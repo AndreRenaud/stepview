@@ -76,7 +76,7 @@ type benchmark struct {
 func (b *benchmark) tick(v *view3D) bool {
 	b.ticks++
 	v.orbit.yaw += 0.02
-	v.requestRender()
+	v.cameraMoved()
 	if b.ticks > 30 {
 		fps := ebiten.ActualFPS()
 		if b.samples == 0 || fps < b.minFPS {
@@ -95,7 +95,8 @@ func (b *benchmark) tick(v *view3D) bool {
 // runScript performs debugging actions from STEPVIEW_SCRIPT, a comma
 // separated list of "pick" (click the centre of the view), "hide:N" (hide
 // tree node N), "center:N" (as if node N were double-clicked), "select:N",
-// "zoom:F" (scale the camera distance) and "wire" (switch to wireframe).
+// "zoom:F" (scale the camera distance), "wire" (switch to wireframe) and
+// "hq" (switch to high quality).
 func (r *Root) runScript(context *guigui.Context, script string) {
 	for act := range strings.SplitSeq(script, ",") {
 		switch {
@@ -114,7 +115,9 @@ func (r *Root) runScript(context *guigui.Context, script string) {
 			n, _ := strconv.Atoi(strings.TrimPrefix(act, "select:"))
 			r.handlePick(n)
 		case act == "wire":
-			r.view.setWireframe(true)
+			r.view.setMode(modeWireframe)
+		case act == "hq":
+			r.view.setMode(modeHighQuality)
 		case strings.HasPrefix(act, "center:"):
 			n, _ := strconv.Atoi(strings.TrimPrefix(act, "center:"))
 			r.onDouble(context, n)

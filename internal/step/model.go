@@ -31,6 +31,11 @@ type Mesh struct {
 	Indices    []uint32
 	FaceStarts []uint32 // index offsets (into Indices) where each face starts
 	Bounds     Box
+
+	// Metallic and Roughness describe the whole mesh's surface when HasPBR
+	// is set (glTF materials); otherwise the viewer guesses from colours.
+	Metallic, Roughness float32
+	HasPBR              bool
 }
 
 // TriangleCount returns the number of triangles.

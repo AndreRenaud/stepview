@@ -20,17 +20,31 @@ import (
 // time, in three passes that draw every triangle into an 8-bit image with
 // a "max" blend: the first pass keeps the highest top byte, the second the
 // highest middle byte among fragments matching that top byte, and the third
-// likewise for the low byte. A final pass draws the colour of the fragments
-// whose depth equals the stored one. Every pass sees identical vertices, so
-// a fragment's interpolated depth is identical in each of them.
+// likewise for the low byte, storing all three bytes so that the third
+// image holds the whole depth. Further passes draw the fragments whose
+// depth equals the stored one: in normal mode, a single pass of lit
+// colour; in high quality mode, the surface colour and material and then
+// the normal, for the screen-space passes in hq.go. Every pass sees
+// identical vertices, so a fragment's interpolated depth is identical in
+// each of them.
 //
 // Projection runs on the CPU, spread over all cores.
 
-const depthShaderSource = `//kage:unit pixels
+const geometryShaderSource = `//kage:unit pixels
 
 package main
 
+// Stage is the pass: 0-2 find the depth, 3 draws the visible surfaces.
 var Stage int
+
+// Output is what stage 3 writes: 0 the lit colour, 1 the colour and
+// material code, 2 the encoded view-space normal.
+var Output int
+
+// Right, Up and Back are the camera's axes in model coordinates.
+var Right vec3
+var Up vec3
+var Back vec3
 
 func Fragment(dstPos vec4, srcPos vec2, color vec4, custom vec4) vec4 {
 	q := floor(clamp(custom.x, 0, 1) * 16777215)
@@ -43,22 +57,52 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4, custom vec4) vec4 {
 		return vec4(hi / 255)
 	}
 	p := dstPos.xy - imageDstOrigin()
-	if abs(imageSrc0UnsafeAt(p+imageSrc0Origin()).r*255-hi) > 0.5 {
-		return vec4(0)
-	}
 	if Stage == 1 {
+		if abs(imageSrc0UnsafeAt(p+imageSrc0Origin()).r*255-hi) > 0.5 {
+			return vec4(0)
+		}
 		return vec4(mid / 255)
 	}
-	if abs(imageSrc1UnsafeAt(p+imageSrc1Origin()).r*255-mid) > 0.5 {
-		return vec4(0)
-	}
 	if Stage == 2 {
-		return vec4(lo / 255)
+		if abs(imageSrc0UnsafeAt(p+imageSrc0Origin()).r*255-hi) > 0.5 ||
+			abs(imageSrc1UnsafeAt(p+imageSrc1Origin()).r*255-mid) > 0.5 {
+			return vec4(0)
+		}
+		return vec4(lo, hi, mid, 255) / 255
 	}
-	if abs(imageSrc2UnsafeAt(p+imageSrc2Origin()).r*255-lo) > 0.5 {
-		return vec4(0)
+	d := imageSrc0UnsafeAt(p+imageSrc0Origin()) * 255
+	if abs(d.r-lo) > 0.5 || abs(d.g-hi) > 0.5 || abs(d.b-mid) > 0.5 {
+		discard()
 	}
-	return vec4(color.rgb, 1)
+	n := normalize(custom.yzw)
+	if Output == 1 {
+		return color
+	}
+	if Output == 2 {
+		return encodeNormal(vec3(dot(n, Right), dot(n, Up), dot(n, Back)))
+	}
+	// A fixed lighting rig in model coordinates (Z up): a key light from
+	// the upper front right, a fill from the left rear and a weak light
+	// from below.
+	l := 0.3 +
+		max(dot(n, normalize(vec3(0.5, -0.6, 0.75))), 0)*0.65 +
+		max(dot(n, normalize(vec3(-0.7, 0.5, 0.3))), 0)*0.35 +
+		max(dot(n, normalize(vec3(0.1, 0.3, -1))), 0)*0.15
+	return vec4(min(color.rgb*l, 1), 1)
+}
+
+// encodeNormal packs a unit vector into 24 bits: its octahedral
+// projection with 12 bits per coordinate.
+func encodeNormal(n vec3) vec4 {
+	n /= abs(n.x) + abs(n.y) + abs(n.z)
+	e := n.xy
+	if n.z < 0 {
+		e = (1 - abs(n.yx)) * (step(0, n.xy)*2 - 1)
+	}
+	e = floor(clamp(e*0.5+0.5, 0, 1)*4095 + 0.5)
+	h := floor(e / 16)
+	l := e - h*16
+	return vec4(h.x, h.y, l.x*16+l.y, 255) / 255
 }
 `
 
@@ -110,20 +154,25 @@ func (c *camera) ray(px, py float64) (origin, dir step.Vec3) {
 }
 
 type renderer struct {
-	depth  [3]*ebiten.Image
-	color  *ebiten.Image
+	depth  [3]*ebiten.Image // depth bytes; in high quality mode later reused
+	color  *ebiten.Image    // the finished picture
 	shader *ebiten.Shader
+	hq     hqPasses
 
 	// The triangles that survive culling and their vertices, rebuilt every
 	// frame, with scratch space indexed like the document's vertices and
 	// the concatenation of its instances' indices.
 	verts   []ebiten.Vertex
 	indices []uint32
+	view    []float32 // view position of each document vertex
 	remap   []int32
 	kept    []uint32
 	idxOff  []int // per instance: its offset in kept
 	doc     *document
 	work    []instanceWork
+
+	// The inverse depth encoding of the last frame: 1/z = enc*depthA + depthB.
+	depthA, depthB float32
 }
 
 // instanceWork holds per-frame results for one visible instance.
@@ -138,52 +187,101 @@ type instanceWork struct {
 // extraFlag marks an index into instanceWork.extraV.
 const extraFlag = 1 << 31
 
-func (r *renderer) resize(w, h int) {
-	if r.color != nil && r.color.Bounds().Dx() == w && r.color.Bounds().Dy() == h {
-		return
-	}
-	opt := &ebiten.NewImageOptions{Unmanaged: true}
-	for i := range r.depth {
-		if r.depth[i] != nil {
-			r.depth[i].Deallocate()
-		}
-		r.depth[i] = ebiten.NewImageWithOptions(image.Rect(0, 0, w, h), opt)
-	}
-	if r.color != nil {
-		r.color.Deallocate()
-	}
-	r.color = ebiten.NewImageWithOptions(image.Rect(0, 0, w, h), opt)
+// renderOptions selects how a frame is drawn.
+type renderOptions struct {
+	hq bool
+	// supersample is the high quality mode's resolution factor (1 or 2);
+	// at 1 the picture is smoothed with FXAA instead.
+	supersample int
+	// aoRadius is the reach of ambient occlusion in model units.
+	aoRadius        float32
+	bgTop, bgBottom [3]float32 // background gradient (high quality mode)
 }
 
-// render draws the document's visible triangles into r.color.
-func (r *renderer) render(d *document, c *camera) {
+// fitImage makes *img a w×h image, reusing it when it already is.
+func fitImage(img **ebiten.Image, w, h int) {
+	if *img != nil && (*img).Bounds().Dx() == w && (*img).Bounds().Dy() == h {
+		return
+	}
+	if *img != nil {
+		(*img).Deallocate()
+	}
+	*img = ebiten.NewImageWithOptions(image.Rect(0, 0, w, h), &ebiten.NewImageOptions{Unmanaged: true})
+}
+
+// render draws the document's visible triangles into r.color, a c.w×c.h
+// image.
+func (r *renderer) render(d *document, c *camera, opt renderOptions) {
 	if r.shader == nil {
-		s, err := ebiten.NewShader([]byte(depthShaderSource))
+		s, err := ebiten.NewShader([]byte(geometryShaderSource))
 		if err != nil {
 			panic(err)
 		}
 		r.shader = s
 	}
-	r.resize(c.w, c.h)
-	for _, img := range r.depth {
-		img.Clear()
+	ss := 1
+	if opt.hq {
+		ss = max(1, opt.supersample)
 	}
+	gc := *c
+	gc.w, gc.h, gc.focal = c.w*ss, c.h*ss, c.focal*float64(ss)
+	for i := range r.depth {
+		fitImage(&r.depth[i], gc.w, gc.h)
+		r.depth[i].Clear()
+	}
+	fitImage(&r.color, c.w, c.h)
 	r.color.Clear()
-	verts, idx := r.project(d, c)
-	if len(idx) == 0 {
+	verts, idx := r.project(d, &gc)
+	if len(idx) > 0 {
+		r.drawDepth(verts, idx)
+	}
+	if !opt.hq {
+		if len(idx) > 0 {
+			r.drawSurface(verts, idx, &gc, r.color, 0)
+		}
 		return
 	}
+	// The colour and material go where the top depth byte was, and the
+	// normal where the middle one was; the third depth image has the
+	// whole depth.
+	r.depth[0].Clear()
+	r.depth[1].Clear()
+	if len(idx) > 0 {
+		r.drawSurface(verts, idx, &gc, r.depth[0], 1)
+		r.drawSurface(verts, idx, &gc, r.depth[1], 2)
+	}
+	r.hq.render(r, c, &gc, ss, opt)
+}
+
+// drawDepth runs the three depth passes.
+func (r *renderer) drawDepth(verts []ebiten.Vertex, idx []uint32) {
 	op := &ebiten.DrawTrianglesShaderOptions{Blend: maxBlend}
-	for stage, dst := range []*ebiten.Image{r.depth[0], r.depth[1], r.depth[2], r.color} {
-		if stage == 3 {
-			op.Blend = ebiten.BlendSourceOver
-		}
+	for stage, dst := range r.depth {
 		op.Uniforms = map[string]any{"Stage": stage}
 		dst.DrawTrianglesShader32(verts, idx, r.shader, op)
-		if stage < 3 {
-			op.Images[stage] = r.depth[stage]
-		}
+		op.Images[stage] = dst
 	}
+}
+
+// drawSurface draws an output of the visible fragments into dst.
+func (r *renderer) drawSurface(verts []ebiten.Vertex, idx []uint32, c *camera, dst *ebiten.Image, output int) {
+	op := &ebiten.DrawTrianglesShaderOptions{Blend: ebiten.BlendCopy}
+	if output == 0 {
+		op.Blend = ebiten.BlendSourceOver
+	}
+	op.Images[0] = r.depth[2]
+	op.Uniforms = map[string]any{
+		"Stage":  3,
+		"Output": output,
+		"Right":  vec3Uniform(c.right),
+		"Up":     vec3Uniform(c.up),
+		"Back":   vec3Uniform(c.back),
+	}
+	dst.DrawTrianglesShader32(verts, idx, r.shader, op)
+}
+
+func vec3Uniform(v step.Vec3) []float32 {
+	return []float32{float32(v.X), float32(v.Y), float32(v.Z)}
 }
 
 // prepare sizes the scratch space for a document.
@@ -200,6 +298,7 @@ func (r *renderer) prepare(d *document) {
 	}
 	r.verts = make([]ebiten.Vertex, len(d.verts))
 	r.indices = make([]uint32, n)
+	r.view = make([]float32, len(d.verts)*3)
 	r.remap = make([]int32, len(d.verts))
 	r.kept = make([]uint32, n)
 }
@@ -215,10 +314,10 @@ func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
 	m := c.viewMatrix(step.Identity())
 	cx, cy, f := float32(c.w)/2, float32(c.h)/2, float32(c.focal)
 	w, h := float32(c.w), float32(c.h)
-	pos, verts := d.pos, d.verts
+	pos, verts, view := d.pos, d.verts, r.view
 	r.work = slices.Grow(r.work[:0], len(d.visible))[:len(d.visible)]
 
-	// Screen positions, with the view position in Custom1-3: x, y and depth.
+	// Screen and view positions (x, y and depth).
 	parallelEach(len(d.visible), func(k int) {
 		in := &d.insts[d.visible[k]]
 		mn, mx := float32(math.Inf(1)), float32(math.Inf(-1))
@@ -228,7 +327,7 @@ func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
 			vy := m[1][0]*x + m[1][1]*y + m[1][2]*z + m[1][3]
 			vz := m[2][0]*x + m[2][1]*y + m[2][2]*z + m[2][3]
 			v := &verts[i]
-			v.Custom1, v.Custom2, v.Custom3 = vx, vy, vz
+			view[i*3], view[i*3+1], view[i*3+2] = vx, vy, vz
 			if vz > 0 {
 				v.DstX = cx + f*vx/vz
 				v.DstY = cy - f*vy/vz
@@ -255,6 +354,7 @@ func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
 	scale := 1 / (1/near - 1/far)
 	offset := 1 / far
 	encode := func(z float32) float32 { return (1/z - offset) * scale }
+	r.depthA, r.depthB = 1/scale, offset
 	// facing reports whether a screen triangle faces the camera and touches
 	// the screen. Front faces are counter-clockwise seen from outside, so
 	// clockwise on screen, where y points down.
@@ -272,8 +372,9 @@ func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
 		mesh := in.mesh
 		base := in.vert0
 		iv := verts[base : base+len(mesh.Positions)/3]
+		ivw := view[base*3 : (base+len(iv))*3]
 		for i := range iv {
-			if z := iv[i].Custom3; z >= clipNear {
+			if z := ivw[i*3+2]; z >= clipNear {
 				iv[i].Custom0 = encode(z)
 			}
 		}
@@ -292,8 +393,8 @@ func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
 		for t := 0; t+2 < len(mesh.Indices); t += 3 {
 			tri := [3]uint32{mesh.Indices[t], mesh.Indices[t+1], mesh.Indices[t+2]}
 			va, vb, vc := &iv[tri[0]], &iv[tri[1]], &iv[tri[2]]
-			if va.Custom3 < clipNear || vb.Custom3 < clipNear || vc.Custom3 < clipNear {
-				wk.clip(tri, iv, clipNear, func(x, y float32) (float32, float32) {
+			if ivw[tri[0]*3+2] < clipNear || ivw[tri[1]*3+2] < clipNear || ivw[tri[2]*3+2] < clipNear {
+				wk.clip(tri, iv, ivw, clipNear, func(x, y float32) (float32, float32) {
 					return cx + f*x/clipNear, cy - f*y/clipNear
 				}, encode(clipNear), facing, use)
 				continue
@@ -346,9 +447,10 @@ func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
 }
 
 // clip cuts a triangle crossing the near plane at depth zn and keeps the
-// part in front: a triangle or a quadrilateral. New vertices interpolate
-// the view position and colour along the cut edges.
-func (wk *instanceWork) clip(tri [3]uint32, iv []ebiten.Vertex, zn float32,
+// part in front: a triangle or a quadrilateral. iv and ivw are the
+// instance's vertices and their view positions. New vertices interpolate
+// the surface attributes along the cut edges.
+func (wk *instanceWork) clip(tri [3]uint32, iv []ebiten.Vertex, ivw []float32, zn float32,
 	project func(x, y float32) (float32, float32), depth float32,
 	facing func(a, b, c *ebiten.Vertex) bool, use func(uint32)) {
 	type corner struct {
@@ -358,20 +460,22 @@ func (wk *instanceWork) clip(tri [3]uint32, iv []ebiten.Vertex, zn float32,
 	var poly [4]corner
 	n := 0
 	for k := range 3 {
-		i, j := &iv[tri[k]], &iv[tri[(k+1)%3]]
-		if i.Custom3 >= zn {
-			poly[n] = corner{*i, tri[k]}
+		a, b := tri[k], tri[(k+1)%3]
+		za, zb := ivw[a*3+2], ivw[b*3+2]
+		if za >= zn {
+			poly[n] = corner{iv[a], a}
 			n++
 		}
-		if (i.Custom3 >= zn) != (j.Custom3 >= zn) {
-			t := (zn - i.Custom3) / (j.Custom3 - i.Custom3)
+		if (za >= zn) != (zb >= zn) {
+			t := (zn - za) / (zb - za)
 			lerp := func(a, b float32) float32 { return a + (b-a)*t }
+			i, j := &iv[a], &iv[b]
 			v := ebiten.Vertex{
-				ColorR: lerp(i.ColorR, j.ColorR), ColorG: lerp(i.ColorG, j.ColorG), ColorB: lerp(i.ColorB, j.ColorB), ColorA: 1,
+				ColorR: lerp(i.ColorR, j.ColorR), ColorG: lerp(i.ColorG, j.ColorG), ColorB: lerp(i.ColorB, j.ColorB), ColorA: i.ColorA,
 				Custom0: depth,
-				Custom1: lerp(i.Custom1, j.Custom1), Custom2: lerp(i.Custom2, j.Custom2), Custom3: zn,
+				Custom1: lerp(i.Custom1, j.Custom1), Custom2: lerp(i.Custom2, j.Custom2), Custom3: lerp(i.Custom3, j.Custom3),
 			}
-			v.DstX, v.DstY = project(v.Custom1, v.Custom2)
+			v.DstX, v.DstY = project(lerp(ivw[a*3], ivw[b*3]), lerp(ivw[a*3+1], ivw[b*3+1]))
 			poly[n] = corner{v, extraFlag}
 			n++
 		}

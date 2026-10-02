@@ -187,8 +187,10 @@ func (l *loader) primitive(p *gltf.Primitive) (*step.Mesh, error) {
 		nrm, _ = modeler.ReadNormal(l.doc, l.doc.Accessors[ni], nil)
 	}
 	base := [4]float64{0.8, 0.8, 0.8, 1}
+	var pbr *gltf.PBRMetallicRoughness
 	if p.Material != nil && *p.Material < len(l.doc.Materials) {
-		if pbr := l.doc.Materials[*p.Material].PBRMetallicRoughness; pbr != nil && pbr.BaseColorFactor != nil {
+		pbr = l.doc.Materials[*p.Material].PBRMetallicRoughness
+		if pbr != nil && pbr.BaseColorFactor != nil {
 			base = *pbr.BaseColorFactor
 		}
 	}
@@ -197,6 +199,11 @@ func (l *loader) primitive(p *gltf.Primitive) (*step.Mesh, error) {
 		cols, _ = modeler.ReadColor(l.doc, l.doc.Accessors[ci], nil)
 	}
 	m := &step.Mesh{Bounds: step.EmptyBox()}
+	if pbr != nil {
+		m.Metallic = float32(pbr.MetallicFactorOrDefault())
+		m.Roughness = float32(pbr.RoughnessFactorOrDefault())
+		m.HasPBR = true
+	}
 	m.Positions = make([]float32, 0, len(pos)*3)
 	for _, v := range pos {
 		m.Positions = append(m.Positions, v[0], v[1], v[2])

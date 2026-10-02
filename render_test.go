@@ -42,6 +42,11 @@ func TestProjectClipsAtNearPlane(t *testing.T) {
 	o.dist = 1e-6
 	o.pitch = 10 * math.Pi / 180
 	c := o.camera(800, 600)
+	// Vertices that project gives no depth, those behind the camera, keep
+	// this mark.
+	for i := range d.verts {
+		d.verts[i].Custom0 = -1
+	}
 	var r renderer
 	verts, idx := r.project(d, &c)
 	clipped := 0
@@ -56,7 +61,7 @@ func TestProjectClipsAtNearPlane(t *testing.T) {
 			t.Fatalf("index %d out of range of %d vertices", i, len(verts))
 		}
 		v := verts[i]
-		if v.Custom3 <= 0 || math.IsNaN(float64(v.DstX)) || math.IsNaN(float64(v.DstY)) {
+		if v.Custom0 < 0 || v.Custom0 > 1 || math.IsNaN(float64(v.DstX)) || math.IsNaN(float64(v.DstY)) {
 			t.Fatalf("vertex behind the camera or invalid: %+v", v)
 		}
 	}

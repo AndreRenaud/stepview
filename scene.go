@@ -11,31 +11,6 @@ import (
 // highlightColour is blended into selected geometry.
 var highlightColour = [3]float32{1.0, 0.55, 0.1}
 
-// studioLights is a fixed lighting rig in model coordinates (Z up): a key
-// light from the upper front right, a fill from the left rear and a weak
-// light from below.
-var studioLights = []struct {
-	dir    step.Vec3
-	energy float32
-}{
-	{step.Vec3{X: 0.5, Y: -0.6, Z: 0.75}.Norm(), 0.65},
-	{step.Vec3{X: -0.7, Y: 0.5, Z: 0.3}.Norm(), 0.35},
-	{step.Vec3{X: 0.1, Y: 0.3, Z: -1}.Norm(), 0.15},
-}
-
-const ambientLight = 0.3
-
-// lighting returns the brightness for a surface normal.
-func lighting(n step.Vec3) float32 {
-	l := float32(ambientLight)
-	for _, s := range studioLights {
-		if d := float32(n.Dot(s.dir)); d > 0 {
-			l += d * s.energy
-		}
-	}
-	return l
-}
-
 // viewNode is a node of the flattened product tree, in depth-first order.
 type viewNode struct {
 	name      string
@@ -66,8 +41,7 @@ type document struct {
 	// The vertices of every instance, in world space, ready for the
 	// renderer.
 	pos         []float32       // 3 per vertex
-	shade       []float32       // 4 per vertex: unlit colour and brightness
-	verts       []ebiten.Vertex // colours; the renderer fills in the rest
+	verts       []ebiten.Vertex // surface attributes; the renderer fills in the rest
 	visible     []int           // instances that are not hidden
 	visibleTris int
 
@@ -115,8 +89,9 @@ func (d *document) addNode(n *step.Node, parentWorld step.Affine, parent, depth 
 	d.nodes[idx].end = len(d.nodes)
 }
 
-// buildGeometry places every instance's vertices in world space, with
-// lighting baked into their colours.
+// buildGeometry places every instance's vertices in world space. Each
+// vertex carries its surface attributes for the shaders: the colour in
+// ColorR-B, the material code in ColorA and the world normal in Custom1-3.
 func (d *document) buildGeometry() {
 	nv := 0
 	for i := range d.insts {
@@ -124,18 +99,25 @@ func (d *document) buildGeometry() {
 		nv += len(d.insts[i].mesh.Positions) / 3
 	}
 	d.pos = make([]float32, nv*3)
-	d.shade = make([]float32, nv*4)
 	d.verts = make([]ebiten.Vertex, nv)
 	parallelEach(len(d.insts), func(i int) {
 		in := &d.insts[i]
 		m := in.mesh
+		name := d.nodes[in.node].name
+		var lastCol [3]float32
+		var lastMat material
 		for k := 0; k < len(m.Positions)/3; k++ {
 			p := in.world.Apply(step.Vec3{X: float64(m.Positions[k*3]), Y: float64(m.Positions[k*3+1]), Z: float64(m.Positions[k*3+2])})
 			n := in.world.ApplyNormal(step.Vec3{X: float64(m.Normals[k*3]), Y: float64(m.Normals[k*3+1]), Z: float64(m.Normals[k*3+2])})
 			v := in.vert0 + k
 			d.pos[v*3], d.pos[v*3+1], d.pos[v*3+2] = float32(p.X), float32(p.Y), float32(p.Z)
-			copy(d.shade[v*4:v*4+3], m.Colors[k*3:k*3+3])
-			d.shade[v*4+3] = lighting(n)
+			// Faces have one colour, so consecutive vertices mostly share it.
+			if c := [3]float32(m.Colors[k*3 : k*3+3]); k == 0 || c != lastCol {
+				lastCol, lastMat = c, meshMaterial(m, c, name)
+			}
+			vt := &d.verts[v]
+			vt.ColorA = float32(lastMat) / 255
+			vt.Custom1, vt.Custom2, vt.Custom3 = float32(n.X), float32(n.Y), float32(n.Z)
 		}
 		d.paint(i)
 	})
@@ -146,18 +128,16 @@ func (d *document) buildGeometry() {
 func (d *document) paint(i int) {
 	in := &d.insts[i]
 	sel := d.isSelected(in.node)
-	for v := in.vert0; v < in.vert0+len(in.mesh.Positions)/3; v++ {
-		col := [3]float32(d.shade[v*4 : v*4+3])
+	cols := in.mesh.Colors
+	for k := range len(in.mesh.Positions) / 3 {
+		col := [3]float32(cols[k*3 : k*3+3])
 		if sel {
 			for j := range col {
 				col[j] = col[j]*0.35 + highlightColour[j]*0.65
 			}
 		}
-		l := d.shade[v*4+3]
-		d.verts[v].ColorR = min(1, col[0]*l)
-		d.verts[v].ColorG = min(1, col[1]*l)
-		d.verts[v].ColorB = min(1, col[2]*l)
-		d.verts[v].ColorA = 1
+		v := &d.verts[in.vert0+k]
+		v.ColorR, v.ColorG, v.ColorB = col[0], col[1], col[2]
 	}
 }
 

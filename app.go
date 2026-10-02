@@ -52,7 +52,7 @@ type Root struct {
 	frontButton basicwidget.Button
 	rightButton basicwidget.Button
 	showButton  basicwidget.Button
-	wireButton  basicwidget.Button
+	modeSelect  basicwidget.Select[renderMode]
 	status      basicwidget.Text
 	tree        basicwidget.List[int]
 	rows        guigui.WidgetSlice[*treeRow]
@@ -86,6 +86,7 @@ type Root struct {
 	revealSet  bool
 	treeWidth  int
 
+	modeItems    []basicwidget.SelectItem[renderMode]
 	treeItems    []basicwidget.ListItem[int]
 	toolbarItems []guigui.LinearLayoutItem
 	bodyItems    []guigui.LinearLayoutItem
@@ -272,7 +273,7 @@ func (r *Root) Build(context *guigui.Context, adder *guigui.ChildAdder) error {
 	adder.AddWidget(&r.frontButton)
 	adder.AddWidget(&r.rightButton)
 	adder.AddWidget(&r.showButton)
-	adder.AddWidget(&r.wireButton)
+	adder.AddWidget(&r.modeSelect)
 	adder.AddWidget(&r.status)
 	adder.AddWidget(&r.tree)
 	adder.AddWidget(&r.splitter)
@@ -305,13 +306,24 @@ func (r *Root) Build(context *guigui.Context, adder *guigui.ChildAdder) error {
 			r.doc.showAll()
 		}
 	})
-	r.wireButton.SetText("Wireframe")
-	r.wireButton.SetToggleable(true)
-	r.wireButton.SetPressed(r.view.wireframe)
-	r.wireButton.OnDown(func(context *guigui.Context) { r.view.setWireframe(!r.view.wireframe) })
-	for _, b := range []*basicwidget.Button{&r.fitButton, &r.isoButton, &r.topButton, &r.frontButton, &r.rightButton, &r.showButton, &r.wireButton} {
+	if r.modeItems == nil {
+		r.modeItems = []basicwidget.SelectItem[renderMode]{
+			{Text: "Normal", Value: modeNormal},
+			{Text: "Wireframe", Value: modeWireframe},
+			{Text: "High quality", Value: modeHighQuality},
+		}
+		r.modeSelect.SetItems(r.modeItems)
+	}
+	r.modeSelect.SelectItemByValue(r.view.mode)
+	r.modeSelect.OnItemSelected(func(context *guigui.Context, index int) {
+		if item, ok := r.modeSelect.ItemByIndex(index); ok {
+			r.view.setMode(item.Value)
+		}
+	})
+	for _, b := range []*basicwidget.Button{&r.fitButton, &r.isoButton, &r.topButton, &r.frontButton, &r.rightButton, &r.showButton} {
 		context.SetEnabled(b, hasDoc)
 	}
+	context.SetEnabled(&r.modeSelect, hasDoc)
 
 	r.status.SetValue(r.statusText)
 	r.status.SetVerticalAlign(basicwidget.VerticalAlignMiddle)
@@ -415,7 +427,7 @@ func (r *Root) Layout(context *guigui.Context, widgetBounds *guigui.WidgetBounds
 		guigui.LinearLayoutItem{Widget: &r.rightButton},
 		guigui.LinearLayoutItem{Size: guigui.FixedSize(u / 4)},
 		guigui.LinearLayoutItem{Widget: &r.showButton},
-		guigui.LinearLayoutItem{Widget: &r.wireButton},
+		guigui.LinearLayoutItem{Widget: &r.modeSelect},
 		guigui.LinearLayoutItem{Size: guigui.FixedSize(u / 2)},
 		guigui.LinearLayoutItem{Widget: &r.status, Size: guigui.FlexibleSize(1)},
 	)
