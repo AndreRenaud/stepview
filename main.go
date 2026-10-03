@@ -29,6 +29,7 @@ func main() {
 		root.pendingPath = argPath(os.Args[1])
 	}
 	root.openDocs = watchOpenDocuments()
+	root.menuCommands, root.nativeMenu = installMenus()
 	opts := &guigui.RunOptions{
 		Title:         "STEP Viewer",
 		WindowSize:    image.Pt(1280, 800),

@@ -22,7 +22,8 @@ make install    # copy the app into /Applications
 
 ## Using it
 
-- **Open…** chooses a file; a path on the command line is loaded at startup.
+- **File > Open…** (⌘O) chooses a file; a path on the command line is loaded
+  at startup.
   On macOS the app bundle also opens any of these files double-clicked in
   Finder or dropped on its Dock icon.
 - The tree on the left shows the product structure. Click an item to select
@@ -36,10 +37,22 @@ make install    # copy the app into /Applications
     clicking empty space clears the selection;
   - `F` fits the whole model, `S` fits the selection and `W` toggles
     wireframe (after clicking the view).
-- **Fit / Iso / Top / Front / Right** set the camera; **Show all** un-hides
-  everything; **Wireframe** switches between shaded rendering and a
-  wireframe of the model edges (B-rep face boundaries, or sharp creases for
-  mesh formats), with the selection drawn in orange.
+- The **View** menu:
+
+  | Item | Shortcut |
+  | --- | --- |
+  | Show Sidebar (the tree and status line) | ⌃⌘S |
+  | Fit All / Fit Selection | ⌘F / ⇧⌘F |
+  | Iso / Top / Front / Right | ⌘1 – ⌘4 |
+  | Spin | ⌘R |
+  | Quality > Normal / Wireframe / High Quality | ⌥⌘1 – ⌥⌘3 |
+  | Show All Parts (un-hide everything) | ⇧⌘H |
+
+  Wireframe draws the model edges (B-rep face boundaries, or sharp creases
+  for mesh formats), with the selection drawn in orange. Hide the sidebar and
+  use Window > Enter Full Screen to see only the model.
+- Elsewhere than macOS there is no menu bar, but the same shortcuts work with
+  Ctrl in place of ⌘ and Alt in place of ⌥ or ⌃.
 
 ## How it works
 

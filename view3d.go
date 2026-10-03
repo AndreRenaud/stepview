@@ -392,8 +392,6 @@ func (v *view3D) HandleButtonInput(context *guigui.Context, widgetBounds *guigui
 		v.fit(v.doc.selected)
 	case inpututil.IsKeyJustPressed(ebiten.KeyW):
 		v.toggleWireframe()
-		// Rebuild so the toolbar reflects the new state.
-		return guigui.HandleInputByWidget(v)
 	default:
 		return guigui.HandleInputResult{}
 	}

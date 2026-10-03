@@ -6,6 +6,7 @@ import (
 	"image"
 	"math"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -48,15 +49,6 @@ type Root struct {
 	guigui.DefaultWidget
 
 	background  basicwidget.Background
-	openButton  basicwidget.Button
-	fitButton   basicwidget.Button
-	isoButton   basicwidget.Button
-	topButton   basicwidget.Button
-	frontButton basicwidget.Button
-	rightButton basicwidget.Button
-	spinButton  basicwidget.Button
-	showButton  basicwidget.Button
-	modeSelect  basicwidget.Select[renderMode]
 	status      basicwidget.Text
 	tree        basicwidget.List[int]
 	rows        guigui.WidgetSlice[*treeRow]
@@ -76,6 +68,13 @@ type Root struct {
 	openDocs    <-chan string
 	started     bool
 
+	// menuCommands delivers commands chosen in the native menu bar; without
+	// one (nativeMenu false) Tick reads the shortcuts itself.
+	menuCommands <-chan menuCommand
+	nativeMenu   bool
+	menuEnabled  uint32
+	menuChecked  uint32
+
 	loadCh   chan loadResult
 	dialogCh chan string
 	loading  bool
@@ -89,14 +88,13 @@ type Root struct {
 	revealNode int // node to reveal in the tree on the next build, or -1
 	revealSet  bool
 	treeWidth  int
+	// sidebarHidden hides the tree and the status line, leaving the window
+	// to the 3D view.
+	sidebarHidden bool
 
-	modeItems    []basicwidget.SelectItem[renderMode]
-	treeItems    []basicwidget.ListItem[int]
-	toolbarItems []guigui.LinearLayoutItem
-	bodyItems    []guigui.LinearLayoutItem
-	mainItems    []guigui.LinearLayoutItem
-	onVis        func(context *guigui.Context, node int, visible bool)
-	onDouble     func(context *guigui.Context, node int)
+	treeItems []basicwidget.ListItem[int]
+	onVis     func(context *guigui.Context, node int, visible bool)
+	onDouble  func(context *guigui.Context, node int)
 }
 
 func (r *Root) WriteStateKey(context *guigui.Context, w *guigui.StateKeyWriter) {
@@ -104,7 +102,7 @@ func (r *Root) WriteStateKey(context *guigui.Context, w *guigui.StateKeyWriter) 
 	w.WriteInt(r.docSerial)
 	w.WriteBool(r.loading)
 	w.WriteInt(r.treeWidth)
-	w.WriteBool(r.view.spinning)
+	w.WriteBool(r.sidebarHidden)
 	if r.doc != nil {
 		w.WriteInt(r.doc.gen)
 	}
@@ -178,6 +176,9 @@ func (r *Root) Tick(context *guigui.Context, widgetBounds *guigui.WidgetBounds) 
 		r.startLoad(r.pendingPath)
 		r.pendingPath = ""
 	}
+	if err := r.handleCommands(context); err != nil {
+		return err
+	}
 	select {
 	case path := <-r.dialogCh:
 		if path != "" {
@@ -233,7 +234,114 @@ func (r *Root) Tick(context *guigui.Context, widgetBounds *guigui.WidgetBounds) 
 			r.setStatus(p)
 		}
 	}
+	r.updateMenuState()
 	return nil
+}
+
+// handleCommands runs the commands chosen from the menu bar or, without a
+// native one, typed as shortcuts.
+func (r *Root) handleCommands(context *guigui.Context) error {
+	if !r.nativeMenu {
+		if cmd, ok := pressedShortcut(runtime.GOOS == "darwin"); ok {
+			return r.runCommand(context, cmd)
+		}
+		return nil
+	}
+	for {
+		select {
+		case cmd := <-r.menuCommands:
+			if err := r.runCommand(context, cmd); err != nil {
+				return err
+			}
+		default:
+			return nil
+		}
+	}
+}
+
+// commandEnabled reports whether a menu command can be used now.
+func (r *Root) commandEnabled(cmd menuCommand) bool {
+	switch cmd {
+	case cmdOpen:
+		return !r.loading
+	case cmdExit, cmdSidebar:
+		return true
+	case cmdFitSelection:
+		return r.doc != nil && r.doc.selected >= 0
+	}
+	return r.doc != nil
+}
+
+// commandChecked reports whether a menu command shows a check mark.
+func (r *Root) commandChecked(cmd menuCommand) bool {
+	switch cmd {
+	case cmdSidebar:
+		return !r.sidebarHidden
+	case cmdSpin:
+		return r.view.spinning
+	case cmdNormal:
+		return r.view.mode == modeNormal
+	case cmdWireframe:
+		return r.view.mode == modeWireframe
+	case cmdHighQuality:
+		return r.view.mode == modeHighQuality
+	}
+	return false
+}
+
+func (r *Root) runCommand(context *guigui.Context, cmd menuCommand) error {
+	if !r.commandEnabled(cmd) {
+		return nil
+	}
+	switch cmd {
+	case cmdOpen:
+		r.openDialog()
+	case cmdExit:
+		return ebiten.Termination
+	case cmdSidebar:
+		r.sidebarHidden = !r.sidebarHidden
+	case cmdFit:
+		r.view.fit(-1)
+	case cmdFitSelection:
+		r.view.fit(r.doc.selected)
+	case cmdIso:
+		r.view.setView(-60*math.Pi/180, 30*math.Pi/180)
+	case cmdTop:
+		r.view.setView(-math.Pi/2, math.Pi/2-1e-3)
+	case cmdFront:
+		r.view.setView(-math.Pi/2, 0)
+	case cmdRight:
+		r.view.setView(0, 0)
+	case cmdSpin:
+		r.view.setSpinning(!r.view.spinning)
+	case cmdShowAll:
+		r.doc.showAll()
+	case cmdNormal:
+		r.view.setMode(modeNormal)
+	case cmdWireframe:
+		r.view.setMode(modeWireframe)
+	case cmdHighQuality:
+		r.view.setMode(modeHighQuality)
+	}
+	return nil
+}
+
+// updateMenuState passes the enabled and checked commands to the menu bar
+// when they change.
+func (r *Root) updateMenuState() {
+	var enabled, checked uint32
+	for cmd := cmdOpen; cmd <= cmdHighQuality; cmd++ {
+		if r.commandEnabled(cmd) {
+			enabled |= 1 << cmd
+		}
+		if r.commandChecked(cmd) {
+			checked |= 1 << cmd
+		}
+	}
+	if enabled != r.menuEnabled || checked != r.menuChecked {
+		r.menuEnabled, r.menuChecked = enabled, checked
+		publishMenuState(enabled, checked)
+	}
 }
 
 func humanCount(n int) string {
@@ -272,18 +380,11 @@ func (r *Root) handlePick(node int) {
 
 func (r *Root) Build(context *guigui.Context, adder *guigui.ChildAdder) error {
 	adder.AddWidget(&r.background)
-	adder.AddWidget(&r.openButton)
-	adder.AddWidget(&r.fitButton)
-	adder.AddWidget(&r.isoButton)
-	adder.AddWidget(&r.topButton)
-	adder.AddWidget(&r.frontButton)
-	adder.AddWidget(&r.rightButton)
-	adder.AddWidget(&r.spinButton)
-	adder.AddWidget(&r.showButton)
-	adder.AddWidget(&r.modeSelect)
-	adder.AddWidget(&r.status)
-	adder.AddWidget(&r.tree)
-	adder.AddWidget(&r.splitter)
+	if !r.sidebarHidden {
+		adder.AddWidget(&r.status)
+		adder.AddWidget(&r.tree)
+		adder.AddWidget(&r.splitter)
+	}
 	adder.AddWidget(&r.view)
 	if r.doc == nil {
 		adder.AddWidget(&r.placeholder)
@@ -292,50 +393,6 @@ func (r *Root) Build(context *guigui.Context, adder *guigui.ChildAdder) error {
 		adder.AddWidget(&r.capture)
 	}
 
-	r.openButton.SetText("Open…")
-	r.openButton.OnDown(func(context *guigui.Context) { r.openDialog() })
-	context.SetEnabled(&r.openButton, !r.loading)
-
-	hasDoc := r.doc != nil
-	r.fitButton.SetText("Fit")
-	r.fitButton.OnDown(func(context *guigui.Context) { r.view.fit(-1) })
-	r.isoButton.SetText("Iso")
-	r.isoButton.OnDown(func(context *guigui.Context) { r.view.setView(-60*math.Pi/180, 30*math.Pi/180) })
-	r.topButton.SetText("Top")
-	r.topButton.OnDown(func(context *guigui.Context) { r.view.setView(-math.Pi/2, math.Pi/2-1e-3) })
-	r.frontButton.SetText("Front")
-	r.frontButton.OnDown(func(context *guigui.Context) { r.view.setView(-math.Pi/2, 0) })
-	r.rightButton.SetText("Right")
-	r.rightButton.OnDown(func(context *guigui.Context) { r.view.setView(0, 0) })
-	r.spinButton.SetText("Spin")
-	r.spinButton.SetToggleable(true)
-	r.spinButton.SetPressed(r.view.spinning)
-	r.spinButton.OnDown(func(context *guigui.Context) { r.view.setSpinning(!r.view.spinning) })
-	r.showButton.SetText("Show all")
-	r.showButton.OnDown(func(context *guigui.Context) {
-		if r.doc != nil {
-			r.doc.showAll()
-		}
-	})
-	if r.modeItems == nil {
-		r.modeItems = []basicwidget.SelectItem[renderMode]{
-			{Text: "Normal", Value: modeNormal},
-			{Text: "Wireframe", Value: modeWireframe},
-			{Text: "High quality", Value: modeHighQuality},
-		}
-		r.modeSelect.SetItems(r.modeItems)
-	}
-	r.modeSelect.SelectItemByValue(r.view.mode)
-	r.modeSelect.OnItemSelected(func(context *guigui.Context, index int) {
-		if item, ok := r.modeSelect.ItemByIndex(index); ok {
-			r.view.setMode(item.Value)
-		}
-	})
-	for _, b := range []*basicwidget.Button{&r.fitButton, &r.isoButton, &r.topButton, &r.frontButton, &r.rightButton, &r.spinButton, &r.showButton} {
-		context.SetEnabled(b, hasDoc)
-	}
-	context.SetEnabled(&r.modeSelect, hasDoc)
-
 	r.status.SetValue(r.statusText)
 	r.status.SetVerticalAlign(basicwidget.VerticalAlignMiddle)
 	r.status.SetEllipsisString("…")
@@ -343,7 +400,7 @@ func (r *Root) Build(context *guigui.Context, adder *guigui.ChildAdder) error {
 	if r.loading {
 		r.placeholder.SetValue("Loading…")
 	} else {
-		r.placeholder.SetValue("Open a STEP file to view it")
+		r.placeholder.SetValue(openHint)
 	}
 	r.placeholder.SetHorizontalAlign(basicwidget.HorizontalAlignCenter)
 	r.placeholder.SetVerticalAlign(basicwidget.VerticalAlignMiddle)
@@ -427,59 +484,30 @@ func (r *Root) Layout(context *guigui.Context, widgetBounds *guigui.WidgetBounds
 	layouter.LayoutWidget(&r.background, b)
 	layouter.LayoutWidget(&r.capture, b)
 
-	r.toolbarItems = slices.Delete(r.toolbarItems, 0, len(r.toolbarItems))
-	r.toolbarItems = append(r.toolbarItems,
-		guigui.LinearLayoutItem{Widget: &r.openButton},
-		guigui.LinearLayoutItem{Size: guigui.FixedSize(u / 4)},
-		guigui.LinearLayoutItem{Widget: &r.fitButton},
-		guigui.LinearLayoutItem{Widget: &r.isoButton},
-		guigui.LinearLayoutItem{Widget: &r.topButton},
-		guigui.LinearLayoutItem{Widget: &r.frontButton},
-		guigui.LinearLayoutItem{Widget: &r.rightButton},
-		guigui.LinearLayoutItem{Widget: &r.spinButton},
-		guigui.LinearLayoutItem{Size: guigui.FixedSize(u / 4)},
-		guigui.LinearLayoutItem{Widget: &r.showButton},
-		guigui.LinearLayoutItem{Widget: &r.modeSelect},
-		guigui.LinearLayoutItem{Size: guigui.FixedSize(u / 2)},
-		guigui.LinearLayoutItem{Widget: &r.status, Size: guigui.FlexibleSize(1)},
-	)
-	tw := min(r.currentTreeWidth(context), b.Dx()-u*6)
-	r.bodyItems = slices.Delete(r.bodyItems, 0, len(r.bodyItems))
-	r.bodyItems = append(r.bodyItems,
-		guigui.LinearLayoutItem{Widget: &r.tree, Size: guigui.FixedSize(tw)},
-		guigui.LinearLayoutItem{Widget: &r.splitter, Size: guigui.FixedSize(u / 3)},
-		guigui.LinearLayoutItem{Widget: &r.view, Size: guigui.FlexibleSize(1)},
-	)
-	r.mainItems = slices.Delete(r.mainItems, 0, len(r.mainItems))
-	r.mainItems = append(r.mainItems,
-		guigui.LinearLayoutItem{
-			Size: guigui.FixedSize(u * 3 / 2),
-			Layout: guigui.LinearLayout{
-				Direction: guigui.LayoutDirectionHorizontal,
-				Items:     r.toolbarItems,
-				Gap:       u / 4,
-				Padding:   guigui.Padding{Start: u / 4, End: u / 4, Top: u / 4},
-			},
-		},
-		guigui.LinearLayoutItem{
-			Size: guigui.FlexibleSize(1),
-			Layout: guigui.LinearLayout{
-				Direction: guigui.LayoutDirectionHorizontal,
-				Items:     r.bodyItems,
-				Padding:   guigui.Padding{Start: u / 4, Top: u / 4, Bottom: u / 4},
-			},
-		},
-	)
-	(guigui.LinearLayout{
-		Direction: guigui.LayoutDirectionVertical,
-		Items:     r.mainItems,
-	}).LayoutWidgets(context, b, layouter)
+	if r.sidebarHidden {
+		layouter.LayoutWidget(&r.view, b)
+		if r.doc == nil {
+			layouter.LayoutWidget(&r.placeholder, b)
+		}
+		return
+	}
 
+	// The tree and the view above a status line.
+	tw := min(r.currentTreeWidth(context), b.Dx()-u*6)
+	top := b.Min.Y + u/4
+	bottom := b.Max.Y - u
+	x := b.Min.X + u/4
+	layouter.LayoutWidget(&r.tree, image.Rect(x, top, x+tw, bottom))
+	x += tw
+	layouter.LayoutWidget(&r.splitter, image.Rect(x, top, x+u/3, bottom))
+	x += u / 3
+	vb := image.Rect(x, top, b.Max.X, bottom)
+	layouter.LayoutWidget(&r.view, vb)
 	if r.doc == nil {
 		// The placeholder covers the 3D view.
-		vb := image.Rect(b.Min.X+tw+u/4+u/3, b.Min.Y+u*3/2+u/4, b.Max.X, b.Max.Y-u/4)
 		layouter.LayoutWidget(&r.placeholder, vb)
 	}
+	layouter.LayoutWidget(&r.status, image.Rect(b.Min.X+u/4, bottom, b.Max.X-u/4, b.Max.Y))
 }
 
 // showAll makes every node visible.
