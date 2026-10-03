@@ -24,8 +24,8 @@ var (
 	matPlastic     = newMaterial(false, 0.5)
 	matDarkPlastic = newMaterial(false, 0.42)
 	matSolderMask  = newMaterial(false, 0.28)
-	matTin         = newMaterial(true, 0.35)
-	matGold        = newMaterial(true, 0.28)
+	matTin         = newMaterial(true, 0.2)
+	matGold        = newMaterial(true, 0.16)
 )
 
 // Colours of the standard KiCad 3D model library, which most ECAD exports

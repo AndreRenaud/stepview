@@ -708,10 +708,14 @@ func (g *geomCache) point(v Value) (Vec3, error) {
 		return Vec3{}, errors.New("missing point")
 	}
 	args, ok := e.PartArgs("CARTESIAN_POINT")
-	if !ok || len(args) < 2 {
-		if e.Is("VERTEX_POINT") {
-			return g.point(e.Arg(1))
+	if !ok && e.Is("VERTEX_POINT") {
+		// Resolve one level only: a self-referencing vertex must not recurse.
+		if p := g.f.Ref(e.Arg(1)); p != nil {
+			e = p
+			args, ok = e.PartArgs("CARTESIAN_POINT")
 		}
+	}
+	if !ok || len(args) < 2 {
 		return Vec3{}, fmt.Errorf("expected CARTESIAN_POINT, got %s", e.Type)
 	}
 	return coords(args[1].AsList()), nil

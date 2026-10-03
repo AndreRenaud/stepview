@@ -257,7 +257,12 @@ func (v *view3D) render(context *guigui.Context, size image.Point) {
 	case modeNormal:
 		v.renderer.render(v.doc, &c, renderOptions{})
 	case modeHighQuality:
-		opt := renderOptions{hq: true, supersample: 1, aoRadius: float32(v.doc.bounds.Diag() * 0.012)}
+		opt := renderOptions{
+			hq:          true,
+			supersample: 1,
+			aoRadius:    float32(v.doc.bounds.Diag() * 0.012),
+			grainSize:   float32(context.Scale()),
+		}
 		opt.bgTop, opt.bgBottom = backgroundColours(v.renderedDark)
 		if size.X*size.Y <= maxSupersampledPixels {
 			if v.dragging || v.ticks-v.lastMove <= settleTicks {

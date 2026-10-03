@@ -194,7 +194,9 @@ type renderOptions struct {
 	// at 1 the picture is smoothed with FXAA instead.
 	supersample int
 	// aoRadius is the reach of ambient occlusion in model units.
-	aoRadius        float32
+	aoRadius float32
+	// grainSize is the size of the film grain in output pixels.
+	grainSize       float32
 	bgTop, bgBottom [3]float32 // background gradient (high quality mode)
 }
 

@@ -431,6 +431,12 @@ func (c *cdt) addConstraintDepth(a, b, depth int) error {
 		if e < 0 {
 			return errCDT
 		}
+		if tr.c[e] {
+			// Crossing constraints are not supported; flipping this edge away
+			// would silently drop the earlier constraint and can leave the
+			// mesh degenerate.
+			return errCDT
+		}
 		u := tr.n[e]
 		if u < 0 {
 			return errCDT

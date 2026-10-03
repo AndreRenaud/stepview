@@ -2,6 +2,7 @@
 #
 #   make              build bin/stepview and bin/stepinfo
 #   make test         run the tests
+#   make fuzz         run each fuzz target for FUZZTIME (default 30s)
 #   make check        format, modernize (go fix) and vet the code
 #   make app          build build/StepView.app
 #   make install      copy the app bundle into /Applications
@@ -28,7 +29,19 @@ APP   := $(BUILD)/$(APP_NAME).app
 
 GO_SRC := go.mod go.sum $(shell find . \( -name '*.go' -o -name '*.m' \) -not -path './$(BUILD)/*')
 
-.PHONY: all build test check app install universal clean
+# Fuzz targets as package:FuzzName; go test runs one fuzz target at a time.
+FUZZTIME    ?= 30s
+FUZZ_TARGETS := \
+	./internal/step:FuzzParse \
+	./internal/step:FuzzParseRecord \
+	./internal/step:FuzzParseNumber \
+	./internal/step:FuzzDecodeString \
+	./internal/step:FuzzLoad \
+	./internal/step:FuzzCDT \
+	./internal/step:FuzzBSplineCurve \
+	./internal/gltfload:FuzzLoad
+
+.PHONY: all build test fuzz check app install universal clean
 
 all: build
 
@@ -42,6 +55,15 @@ $(BIN)/stepinfo: $(GO_SRC) | check
 
 test: check
 	$(GO) test ./...
+
+# Failing inputs are saved under the package's testdata/fuzz directory, where
+# they become regression cases for "make test".
+fuzz:
+	@for t in $(FUZZ_TARGETS); do \
+		pkg=$${t%%:*}; name=$${t##*:}; \
+		echo "== $$pkg $$name"; \
+		$(GO) test -run '^$$' -fuzz "^$$name\$$" -fuzztime $(FUZZTIME) $$pkg || exit 1; \
+	done
 
 # Runs before every build and test: rewrites the code with gofmt and go fix
 # (which applies the modernize fixers), then vets it.

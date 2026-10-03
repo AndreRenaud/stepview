@@ -22,8 +22,12 @@ func LoadFile(path string) (*step.Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	return load(doc, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+}
+
+// load converts a decoded document; name labels the root node.
+func load(doc *gltf.Document, name string) (*step.Model, error) {
 	l := &loader{doc: doc, meshes: map[int][]*step.Mesh{}}
-	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	// Y-up metres -> Z-up millimetres.
 	conv := step.Affine{R: [3][3]float64{{1000, 0, 0}, {0, 0, -1000}, {0, 1000, 0}}}
 	root := &step.Node{Name: name, Local: conv}
@@ -32,7 +36,7 @@ func LoadFile(path string) (*step.Model, error) {
 		sceneIdx = *doc.Scene
 	}
 	var nodes []int
-	if sceneIdx < len(doc.Scenes) {
+	if sceneIdx >= 0 && sceneIdx < len(doc.Scenes) {
 		nodes = doc.Scenes[sceneIdx].Nodes
 	} else {
 		// No scenes: treat every node that is not a child as a root.
@@ -166,13 +170,21 @@ func (l *loader) primitive(p *gltf.Primitive) (*step.Mesh, error) {
 	if !ok {
 		return nil, errors.New("no positions")
 	}
-	pos, err := modeler.ReadPosition(l.doc, l.doc.Accessors[pi], nil)
+	pa, err := l.accessor(pi)
+	if err != nil {
+		return nil, err
+	}
+	pos, err := modeler.ReadPosition(l.doc, pa, nil)
 	if err != nil {
 		return nil, err
 	}
 	var idx []uint32
 	if p.Indices != nil {
-		idx, err = modeler.ReadIndices(l.doc, l.doc.Accessors[*p.Indices], nil)
+		ia, err := l.accessor(*p.Indices)
+		if err != nil {
+			return nil, err
+		}
+		idx, err = modeler.ReadIndices(l.doc, ia, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -183,20 +195,24 @@ func (l *loader) primitive(p *gltf.Primitive) (*step.Mesh, error) {
 		}
 	}
 	var nrm [][3]float32
-	if ni, ok := p.Attributes[gltf.NORMAL]; ok {
-		nrm, _ = modeler.ReadNormal(l.doc, l.doc.Accessors[ni], nil)
+	if i, ok := p.Attributes[gltf.NORMAL]; ok {
+		if a, err := l.accessor(i); err == nil {
+			nrm, _ = modeler.ReadNormal(l.doc, a, nil)
+		}
 	}
 	base := [4]float64{0.8, 0.8, 0.8, 1}
 	var pbr *gltf.PBRMetallicRoughness
-	if p.Material != nil && *p.Material < len(l.doc.Materials) {
+	if p.Material != nil && *p.Material >= 0 && *p.Material < len(l.doc.Materials) {
 		pbr = l.doc.Materials[*p.Material].PBRMetallicRoughness
 		if pbr != nil && pbr.BaseColorFactor != nil {
 			base = *pbr.BaseColorFactor
 		}
 	}
 	var cols [][4]uint8
-	if ci, ok := p.Attributes[gltf.COLOR_0]; ok {
-		cols, _ = modeler.ReadColor(l.doc, l.doc.Accessors[ci], nil)
+	if i, ok := p.Attributes[gltf.COLOR_0]; ok {
+		if a, err := l.accessor(i); err == nil {
+			cols, _ = modeler.ReadColor(l.doc, a, nil)
+		}
 	}
 	m := &step.Mesh{Bounds: step.EmptyBox()}
 	if pbr != nil {
@@ -238,6 +254,14 @@ func (l *loader) primitive(p *gltf.Primitive) (*step.Mesh, error) {
 	}
 	m.FaceStarts = []uint32{0}
 	return m, nil
+}
+
+// accessor returns the i'th accessor, or an error if there is none.
+func (l *loader) accessor(i int) (*gltf.Accessor, error) {
+	if i < 0 || i >= len(l.doc.Accessors) || l.doc.Accessors[i] == nil {
+		return nil, fmt.Errorf("accessor %d out of range", i)
+	}
+	return l.doc.Accessors[i], nil
 }
 
 func computeNormals(pos [][3]float32, idx []uint32) [][3]float32 {

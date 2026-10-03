@@ -13,6 +13,7 @@ func TestShadersCompile(t *testing.T) {
 		"blur":      blurShaderSource,
 		"composite": compositeShaderSource,
 		"fxaa":      fxaaShaderSource,
+		"resolve":   resolveShaderSource,
 	} {
 		if _, err := ebiten.NewShader([]byte(src)); err != nil {
 			t.Errorf("%s: %v", name, err)

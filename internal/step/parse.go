@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
 	"strconv"
 	"strings"
@@ -434,11 +435,14 @@ func (p *parser) parseRecord() (*Entity, error) {
 func (p *parser) parseInt() (int, bool) {
 	start := p.i
 	v := 0
+	overflow := false
 	for p.i < len(p.s) && p.s[p.i] >= '0' && p.s[p.i] <= '9' {
-		v = v*10 + int(p.s[p.i]-'0')
+		d := int(p.s[p.i] - '0')
+		overflow = overflow || v > (math.MaxInt-d)/10
+		v = v*10 + d
 		p.i++
 	}
-	return v, p.i > start
+	return v, p.i > start && !overflow
 }
 
 func isKeywordChar(c byte) bool {

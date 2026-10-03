@@ -8,10 +8,18 @@ import (
 // findSpan returns the knot span index for parameter u (The NURBS Book A2.1).
 // n is the index of the last control point.
 func findSpan(n, p int, u float64, U []float64) int {
+	// At the ends of the domain use the nearest non-empty span: repeated end
+	// knots can make span n or p zero-length, where every basis function is 0.
 	if u >= U[n+1] {
+		for n > p && U[n] >= U[n+1] {
+			n--
+		}
 		return n
 	}
 	if u <= U[p] {
+		for p < n && U[p] >= U[p+1] {
+			p++
+		}
 		return p
 	}
 	low, high := p, n+1

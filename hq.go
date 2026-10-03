@@ -15,7 +15,8 @@ import (
 // Screen-space passes then compute ambient occlusion at the output
 // resolution and blur it, light every surface with a physically based
 // model (into depth[2], which is no longer needed), and reduce the result
-// to the output, either by averaging 2×2 samples or with FXAA.
+// to the output, either by averaging 2×2 samples or with FXAA, adding film
+// grain on the way.
 //
 // View space here has x right, y up and z towards the viewer.
 
@@ -213,9 +214,18 @@ func studio(w vec3, rough float) vec3 {
 	sky := mix(horizonL, zenithL, smoothstep(0, 1, w.z))
 	ground := mix(horizonL*0.9, nadirL, smoothstep(0, 0.7, -w.z))
 	l := mix(ground, sky, smoothstep(-e, e, w.z))
+	// Pale panels and dark flags around the walls, which give upright
+	// metal something to reflect; blurred away on rough surfaces, and
+	// averaging out in studioIrradiance.
+	az := atan2(w.y, w.x)
+	walls := sin(3*az+0.6)*0.6 + sin(5*az+2.1)*0.4
+	l *= 1 + walls*0.4*(1-rough)*(1-smoothstep(0.2, 0.7, abs(w.z)))
 	l += overheadL * softbox(w, vec3(0, 0, 1), vec3(1, 0, 0), vec3(0, 1, 0), vec2(0.7, 0.35), rough)
-	l += 3 * softbox(w, normalize(vec3(1, -0.3, 0.3)), normalize(vec3(0.3, 1, 0)), normalize(vec3(-0.3, 0.09, 1)), vec2(0.12, 0.6), rough)
-	l += 2.5 * softbox(w, normalize(vec3(-0.6, 0.8, 0.25)), normalize(vec3(-0.8, -0.6, 0)), normalize(vec3(0.15, -0.2, 1)), vec2(0.12, 0.6), rough)
+	// The strip lights are brighter in reflections than their share of
+	// studioIrradiance, as a photographer's reflectors would make them,
+	// to give metals crisp highlights.
+	l += 4.5 * softbox(w, normalize(vec3(1, -0.3, 0.3)), normalize(vec3(0.3, 1, 0)), normalize(vec3(-0.3, 0.09, 1)), vec2(0.2, 0.6), rough)
+	l += 4 * softbox(w, normalize(vec3(-0.6, 0.8, 0.25)), normalize(vec3(-0.8, -0.6, 0)), normalize(vec3(0.15, -0.2, 1)), vec2(0.2, 0.6), rough)
 	return vec3(l) * vec3(1, 0.99, 0.97)
 }
 
@@ -247,7 +257,7 @@ func direct(n, v, l, base, f0 vec3, metal, rough float) vec3 {
 	h := normalize(l + v)
 	ndv := max(dot(n, v), 1e-4)
 	ndh := max(dot(n, h), 0)
-	a := max(rough, 0.15)
+	a := max(rough, 0.08)
 	a *= a
 	a2 := a * a
 	dd := ndh*ndh*(a2-1) + 1
@@ -311,7 +321,9 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 
 	// The studio.
 	diff := base * (1 - metal) * studioIrradiance(toModel(n)) * ao
-	specOcc := mix(1, clamp(pow(ndv+ao, exp2(-16*rough-1))-1+ao, 0, 1), 0.6)
+	// Occlusion dims reflections less on metals, which mirror their
+	// surroundings rather than scatter light.
+	specOcc := mix(1, clamp(pow(ndv+ao, exp2(-16*rough-1))-1+ao, 0, 1), mix(0.6, 0.3, metal))
 	spec := studio(toModel(reflect(-v, n)), rough) * envBRDF(f0, rough, ndv) * specOcc
 
 	c := neutral((lit + diff + spec) * 0.72)
@@ -319,10 +331,54 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 }
 `
 
-// fxaaShaderSource smooths jagged edges in src0 (FXAA, after Lottes).
+// hqGrain adds film grain to the output: soft monochrome noise, strongest
+// in the mid-tones, with a new pattern on every frame.
+const hqGrain = `
+// GrainAmount is the grain's peak-to-peak strength, GrainSize its size in
+// output pixels and GrainSeed picks the pattern.
+var GrainAmount float
+var GrainSize float
+var GrainSeed float
+
+// hash returns a pseudo-random number in [0, 1) for a lattice point
+// (Hoskins's hash without sine).
+func hash(p vec2) float {
+	q := fract(vec3(p.x, p.y, p.x) * 0.1031)
+	q += dot(q, q.yzx+33.33)
+	return fract((q.x + q.y) * q.z)
+}
+
+func grain(c vec3, p vec2) vec3 {
+	g := p/GrainSize + vec2(GrainSeed*37, GrainSeed*17)
+	i := floor(g)
+	f := g - i
+	f = f * f * (3 - 2*f)
+	n := mix(mix(hash(i), hash(i+vec2(1, 0)), f.x), mix(hash(i+vec2(0, 1)), hash(i+vec2(1, 1)), f.x), f.y)
+	l := dot(c, vec3(0.299, 0.587, 0.114))
+	return clamp(c+(n-0.5)*GrainAmount*(0.4+2.4*l*(1-l)), 0, 1)
+}
+`
+
+// resolveShaderSource averages 2×2 samples of src0 into each output pixel
+// and adds grain.
+const resolveShaderSource = `//kage:unit pixels
+
+package main
+` + hqGrain + `
+func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
+	p := dstPos.xy - imageDstOrigin()
+	q := floor(p)*2 + 0.5 + imageSrc0Origin()
+	c := imageSrc0At(q) + imageSrc0At(q+vec2(1, 0)) + imageSrc0At(q+vec2(0, 1)) + imageSrc0At(q+vec2(1, 1))
+	return vec4(grain(c.rgb/4, p), 1)
+}
+`
+
+// fxaaShaderSource smooths jagged edges in src0 (FXAA, after Lottes) and
+// adds grain.
 const fxaaShaderSource = `//kage:unit pixels
 
 package main
+` + hqGrain + `
 
 // sample reads src0 at p (in pixels) with bilinear filtering.
 func sample(p vec2) vec3 {
@@ -358,18 +414,23 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 	b := a*0.5 + 0.25*(sample(p-dir*0.5)+sample(p+dir*0.5))
 	lb := luma(b)
 	if lb < lmin || lb > lmax {
-		return vec4(a, 1)
+		return vec4(grain(a, p), 1)
 	}
-	return vec4(b, 1)
+	return vec4(grain(b, p), 1)
 }
 `
 
 // hqPasses holds the high quality renderer's screen-space passes and
 // their images.
 type hqPasses struct {
-	ssao, blur, composite, fxaa *ebiten.Shader
-	ao, aoBlur                  *ebiten.Image
+	ssao, blur, composite, fxaa, resolve *ebiten.Shader
+	ao, aoBlur                           *ebiten.Image
+	frame                                int // counts renders, to vary the grain
 }
+
+// grainAmount is the film grain's peak-to-peak strength in the high
+// quality renderer.
+const grainAmount = 0.08
 
 func mustShader(src string) *ebiten.Shader {
 	s, err := ebiten.NewShader([]byte(src))
@@ -387,7 +448,9 @@ func (h *hqPasses) render(r *renderer, c, gc *camera, ss int, opt renderOptions)
 		h.blur = mustShader(blurShaderSource)
 		h.composite = mustShader(compositeShaderSource)
 		h.fxaa = mustShader(fxaaShaderSource)
+		h.resolve = mustShader(resolveShaderSource)
 	}
+	h.frame++
 	fitImage(&h.ao, c.w, c.h)
 	fitImage(&h.aoBlur, c.w, c.h)
 	right, up, back := gc.right, gc.up, gc.back
@@ -409,14 +472,16 @@ func (h *hqPasses) render(r *renderer, c, gc *camera, ss int, opt renderOptions)
 	fullscreen(h.ao, h.ssao, u, r.depth[2], r.depth[1])
 	fullscreen(h.aoBlur, h.blur, u, h.ao, r.depth[2])
 	fullscreen(r.depth[2], h.composite, u, r.depth[0], r.depth[1], h.aoBlur)
-	if ss == 1 {
-		fullscreen(r.color, h.fxaa, nil, r.depth[2])
-		return
+	g := map[string]any{
+		"GrainAmount": float32(grainAmount),
+		"GrainSize":   max(1, opt.grainSize),
+		"GrainSeed":   float32(h.frame % 97),
 	}
-	// Linear filtering halfway between four samples averages them.
-	op := &ebiten.DrawImageOptions{Filter: ebiten.FilterLinear, Blend: ebiten.BlendCopy}
-	op.GeoM.Scale(1/float64(ss), 1/float64(ss))
-	r.color.DrawImage(r.depth[2], op)
+	if ss == 1 {
+		fullscreen(r.color, h.fxaa, g, r.depth[2])
+	} else {
+		fullscreen(r.color, h.resolve, g, r.depth[2])
+	}
 }
 
 // fullscreen covers dst with a shader's output.
