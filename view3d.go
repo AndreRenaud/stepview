@@ -104,6 +104,13 @@ type view3D struct {
 	pressPos   image.Point
 	lastPos    image.Point
 	viewSize   image.Point
+
+	// The last pick's position and camera, to recognise clicking the same
+	// spot again, which picks the next object behind.
+	pickPos   image.Point
+	pickOrbit orbit
+	pickSize  image.Point
+	picked    bool
 }
 
 // OnPicked registers a handler called with the picked node (or -1) when
@@ -168,6 +175,7 @@ func (v *view3D) setDocument(d *document) {
 		return
 	}
 	v.doc = d
+	v.picked = false
 	if d == nil {
 		return
 	}
@@ -354,14 +362,33 @@ func (v *view3D) HandlePointingInput(context *guigui.Context, widgetBounds *guig
 	// Released.
 	v.dragging = false
 	if !v.moved && v.dragButton == ebiten.MouseButtonLeft && v.doc != nil {
-		node := -1
-		if o, d, ok := v.ray(pos.Sub(b.Min)); ok {
-			node = v.doc.pick(o, d)
-		}
-		guigui.DispatchEvent(v, view3DEventPicked, node)
+		guigui.DispatchEvent(v, view3DEventPicked, v.pickAt(context, pos.Sub(b.Min)))
 		return guigui.HandleInputByWidget(v)
 	}
 	return guigui.AbortHandlingInputByWidget(v)
+}
+
+// pickAt returns the node to select for a click at a point in widget
+// pixels, or -1. Clicking the same spot again without moving the camera
+// steps through the objects under it, from front to back.
+func (v *view3D) pickAt(context *guigui.Context, p image.Point) int {
+	o, d, ok := v.ray(p)
+	if !ok {
+		return -1
+	}
+	hits := v.doc.pickAll(o, d)
+	dp := p.Sub(v.pickPos)
+	slop := 4 * context.Scale()
+	again := v.picked && v.pickOrbit == v.orbit && v.pickSize == v.viewSize &&
+		math.Hypot(float64(dp.X), float64(dp.Y)) <= slop
+	v.pickPos, v.pickOrbit, v.pickSize, v.picked = p, v.orbit, v.viewSize, true
+	if len(hits) == 0 {
+		return -1
+	}
+	if again {
+		return v.doc.nextPick(hits)
+	}
+	return hits[0]
 }
 
 // zoom scales the camera distance, keeping the point under the cursor

@@ -24,7 +24,21 @@ const (
 	cmdNormal
 	cmdWireframe
 	cmdHighQuality
+	cmdMillimetres
+	cmdCentimetres
+	cmdMetres
+	cmdInches
+
+	numCommands
 )
+
+// unitCommands are the commands choosing each lengthUnit.
+var unitCommands = [...]menuCommand{
+	unitMillimetres: cmdMillimetres,
+	unitCentimetres: cmdCentimetres,
+	unitMetres:      cmdMetres,
+	unitInches:      cmdInches,
+}
 
 // menuItem is an entry in a menu: a command, a separator (title "-") or a
 // submenu.
@@ -69,6 +83,12 @@ var menus = []menu{
 			{cmd: cmdNormal, title: "Normal", key: '1', alt: true},
 			{cmd: cmdWireframe, title: "Wireframe", key: '2', alt: true},
 			{cmd: cmdHighQuality, title: "High Quality", key: '3', alt: true},
+		}},
+		{title: "Units", sub: []menuItem{
+			{cmd: cmdMillimetres, title: "Millimetres"},
+			{cmd: cmdCentimetres, title: "Centimetres"},
+			{cmd: cmdMetres, title: "Metres"},
+			{cmd: cmdInches, title: "Inches"},
 		}},
 		separator,
 		{cmd: cmdShowAll, title: "Show All Parts", key: 'h', shift: true},

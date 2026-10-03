@@ -1,7 +1,9 @@
 package main
 
 import (
+	"cmp"
 	"math"
+	"slices"
 
 	"github.com/hajimehoshi/ebiten/v2"
 
@@ -240,6 +242,16 @@ func (d *document) subtreeBounds(sub int) step.Box {
 	if !b.Empty() || sub < 0 || sub >= len(d.nodes) {
 		return b
 	}
+	return d.nodeBounds(sub)
+}
+
+// nodeBounds returns the bounds of all of a subtree's geometry, hidden or
+// not.
+func (d *document) nodeBounds(sub int) step.Box {
+	b := step.EmptyBox()
+	if sub < 0 || sub >= len(d.nodes) {
+		return b
+	}
 	for _, inst := range d.insts {
 		if inst.node >= sub && inst.node < d.nodes[sub].end {
 			b.Union(inst.bounds)
@@ -267,13 +279,25 @@ func (d *document) visibleBounds(sub int) step.Box {
 
 // pick returns the node hit by a ray in model coordinates, or -1.
 func (d *document) pick(origin, dir step.Vec3) int {
-	best := math.Inf(1)
-	hit := -1
+	if hits := d.pickAll(origin, dir); len(hits) > 0 {
+		return hits[0]
+	}
+	return -1
+}
+
+// pickAll returns the nodes hit by a ray in model coordinates, nearest
+// first, each once.
+func (d *document) pickAll(origin, dir step.Vec3) []int {
+	type hit struct {
+		t    float64
+		node int
+	}
+	var hits []hit
 	for _, inst := range d.insts {
 		if d.effectiveHidden(inst.node) {
 			continue
 		}
-		if !rayBox(origin, dir, inst.bounds, best) {
+		if !rayBox(origin, dir, inst.bounds, math.Inf(1)) {
 			continue
 		}
 		inv := inst.world.Inverse()
@@ -282,20 +306,44 @@ func (d *document) pick(origin, dir step.Vec3) int {
 		// An affine map preserves the ray parameter, so local hit distances
 		// compare directly with world ones.
 		m := inst.mesh
-		if !rayBox(o, dr, m.Bounds, best) {
-			continue
-		}
+		best := math.Inf(1)
 		for t := 0; t+2 < len(m.Indices); t += 3 {
 			a := vtx(m, m.Indices[t])
 			b := vtx(m, m.Indices[t+1])
 			c := vtx(m, m.Indices[t+2])
 			if tt, ok := rayTriangle(o, dr, a, b, c); ok && tt < best {
 				best = tt
-				hit = inst.node
 			}
 		}
+		if !math.IsInf(best, 1) {
+			hits = append(hits, hit{best, inst.node})
+		}
 	}
-	return hit
+	slices.SortStableFunc(hits, func(a, b hit) int { return cmp.Compare(a.t, b.t) })
+	var nodes []int
+	for _, h := range hits {
+		if !slices.Contains(nodes, h.node) {
+			nodes = append(nodes, h.node)
+		}
+	}
+	return nodes
+}
+
+// nextPick returns the node to select when the same spot is clicked again,
+// given the nodes under it from pickAll: the first one behind the
+// selection, or the nearest when the selection is the farthest or not
+// among them.
+func (d *document) nextPick(hits []int) int {
+	if len(hits) == 0 {
+		return -1
+	}
+	last := -1
+	for i, n := range hits {
+		if d.isSelected(n) {
+			last = i
+		}
+	}
+	return hits[(last+1)%len(hits)]
 }
 
 func vtx(m *step.Mesh, i uint32) step.Vec3 {

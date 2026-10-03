@@ -103,3 +103,56 @@ func TestSubtreeBoundsIgnoresVisibility(t *testing.T) {
 		t.Errorf("bounds changed when hidden: %v vs %v", got, b)
 	}
 }
+
+func TestInfoText(t *testing.T) {
+	b := step.Box{Min: step.Vec3{X: -10, Y: 0, Z: 0}, Max: step.Vec3{X: 10, Y: 25.4, Z: 5}}
+	labels, values := infoText(b, unitInches)
+	if labels != "Position\nSize" {
+		t.Errorf("labels = %q", labels)
+	}
+	if want := "0.000, 0.500, 0.098 in\n0.787 × 1.000 × 0.197 in"; values != want {
+		t.Errorf("values = %q, want %q", values, want)
+	}
+	if got := unitMillimetres.format(-0.001); got != "0.00" {
+		t.Errorf("format(-0.001) = %q, want 0.00", got)
+	}
+	if got := unitMetres.format(-1234); got != "-1.2340" {
+		t.Errorf("format(-1234) = %q, want -1.2340", got)
+	}
+}
+
+func TestPickThrough(t *testing.T) {
+	d := loadDoc(t, "as1_pe.stp")
+	// Look for a ray along Y that passes through several parts.
+	b := d.bounds
+	var hits []int
+	var origin step.Vec3
+	for i := 1; i < 20 && len(hits) < 2; i++ {
+		for j := 1; j < 20 && len(hits) < 2; j++ {
+			origin = step.Vec3{
+				X: b.Min.X + (b.Max.X-b.Min.X)*float64(i)/20,
+				Y: b.Min.Y - 10,
+				Z: b.Min.Z + (b.Max.Z-b.Min.Z)*float64(j)/20,
+			}
+			hits = d.pickAll(origin, step.Vec3{Y: 1})
+		}
+	}
+	if len(hits) < 2 {
+		t.Fatal("no ray through two parts")
+	}
+	if got := d.pick(origin, step.Vec3{Y: 1}); got != hits[0] {
+		t.Errorf("pick = %d, want the nearest hit %d", got, hits[0])
+	}
+	// Clicking again steps back through the hits and wraps to the front.
+	d.setSelected(-1)
+	if got := d.nextPick(hits); got != hits[0] {
+		t.Errorf("with nothing selected, nextPick = %d, want %d", got, hits[0])
+	}
+	for i := range hits {
+		d.setSelected(hits[i])
+		want := hits[(i+1)%len(hits)]
+		if got := d.nextPick(hits); got != want {
+			t.Errorf("after hit %d, nextPick = %d, want %d", i, got, want)
+		}
+	}
+}

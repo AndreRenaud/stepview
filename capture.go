@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"image"
 	"image/png"
 	"log"
@@ -93,21 +94,24 @@ func (b *benchmark) tick(v *view3D) bool {
 }
 
 // runScript performs debugging actions from STEPVIEW_SCRIPT, a comma
-// separated list of "pick" (click the centre of the view), "hide:N" (hide
+// separated list of "pick" (click the centre of the view), "pickat:FX:FY"
+// (click at that fraction of the view's width and height), "hide:N" (hide
 // tree node N), "center:N" (as if node N were double-clicked), "select:N",
 // "zoom:F" (scale the camera distance), "wire" (switch to wireframe),
-// "hq" (switch to high quality), "spin" (start spinning) and "sidebar"
-// (toggle the sidebar).
+// "hq" (switch to high quality), "spin" (start spinning), "sidebar"
+// (toggle the sidebar) and "units:N" (choose lengthUnit N).
 func (r *Root) runScript(context *guigui.Context, script string) {
 	for act := range strings.SplitSeq(script, ",") {
 		switch {
-		case act == "pick":
-			c := r.view.viewSize.Div(2)
-			if o, d, ok := r.view.ray(c); ok {
-				node := r.doc.pick(o, d)
-				log.Printf("script: picked node %d (%s)", node, nodeName(r.doc, node))
-				r.handlePick(node)
+		case act == "pick" || strings.HasPrefix(act, "pickat:"):
+			p := r.view.viewSize.Div(2)
+			var fx, fy float64
+			if _, err := fmt.Sscanf(act, "pickat:%g:%g", &fx, &fy); err == nil {
+				p = image.Pt(int(fx*float64(r.view.viewSize.X)), int(fy*float64(r.view.viewSize.Y)))
 			}
+			node := r.view.pickAt(context, p)
+			log.Printf("script: picked node %d (%s)", node, nodeName(r.doc, node))
+			r.handlePick(node)
 		case strings.HasPrefix(act, "zoom:"):
 			f, _ := strconv.ParseFloat(strings.TrimPrefix(act, "zoom:"), 64)
 			r.view.orbit.dist *= f
@@ -123,6 +127,11 @@ func (r *Root) runScript(context *guigui.Context, script string) {
 			r.view.setSpinning(true)
 		case act == "sidebar":
 			r.sidebarHidden = !r.sidebarHidden
+		case strings.HasPrefix(act, "units:"):
+			n, _ := strconv.Atoi(strings.TrimPrefix(act, "units:"))
+			if n >= 0 && n < len(unitCommands) {
+				r.units = lengthUnit(n)
+			}
 		case strings.HasPrefix(act, "center:"):
 			n, _ := strconv.Atoi(strings.TrimPrefix(act, "center:"))
 			r.onDouble(context, n)

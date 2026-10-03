@@ -55,6 +55,7 @@ type Root struct {
 	splitter    splitter
 	view        view3D
 	placeholder basicwidget.Text
+	info        infoPanel
 	capture     captureOverlay
 	bench       *benchmark
 
@@ -91,6 +92,8 @@ type Root struct {
 	// sidebarHidden hides the tree and the status line, leaving the window
 	// to the 3D view.
 	sidebarHidden bool
+	// units is the unit for lengths in the selection's info panel.
+	units lengthUnit
 
 	treeItems []basicwidget.ListItem[int]
 	onVis     func(context *guigui.Context, node int, visible bool)
@@ -103,6 +106,7 @@ func (r *Root) WriteStateKey(context *guigui.Context, w *guigui.StateKeyWriter) 
 	w.WriteBool(r.loading)
 	w.WriteInt(r.treeWidth)
 	w.WriteBool(r.sidebarHidden)
+	w.WriteInt(int(r.units))
 	if r.doc != nil {
 		w.WriteInt(r.doc.gen)
 	}
@@ -264,7 +268,7 @@ func (r *Root) commandEnabled(cmd menuCommand) bool {
 	switch cmd {
 	case cmdOpen:
 		return !r.loading
-	case cmdExit, cmdSidebar:
+	case cmdExit, cmdSidebar, cmdMillimetres, cmdCentimetres, cmdMetres, cmdInches:
 		return true
 	case cmdFitSelection:
 		return r.doc != nil && r.doc.selected >= 0
@@ -285,6 +289,8 @@ func (r *Root) commandChecked(cmd menuCommand) bool {
 		return r.view.mode == modeWireframe
 	case cmdHighQuality:
 		return r.view.mode == modeHighQuality
+	case cmdMillimetres, cmdCentimetres, cmdMetres, cmdInches:
+		return unitCommands[r.units] == cmd
 	}
 	return false
 }
@@ -322,6 +328,8 @@ func (r *Root) runCommand(context *guigui.Context, cmd menuCommand) error {
 		r.view.setMode(modeWireframe)
 	case cmdHighQuality:
 		r.view.setMode(modeHighQuality)
+	case cmdMillimetres, cmdCentimetres, cmdMetres, cmdInches:
+		r.units = lengthUnit(slices.Index(unitCommands[:], cmd))
 	}
 	return nil
 }
@@ -330,7 +338,7 @@ func (r *Root) runCommand(context *guigui.Context, cmd menuCommand) error {
 // when they change.
 func (r *Root) updateMenuState() {
 	var enabled, checked uint32
-	for cmd := cmdOpen; cmd <= cmdHighQuality; cmd++ {
+	for cmd := range numCommands {
 		if r.commandEnabled(cmd) {
 			enabled |= 1 << cmd
 		}
@@ -388,6 +396,15 @@ func (r *Root) Build(context *guigui.Context, adder *guigui.ChildAdder) error {
 	adder.AddWidget(&r.view)
 	if r.doc == nil {
 		adder.AddWidget(&r.placeholder)
+	}
+	if r.doc != nil && r.doc.selected >= 0 {
+		name := r.doc.nodes[r.doc.selected].name
+		if name == "" {
+			name = "(unnamed)"
+		}
+		labels, values := infoText(r.doc.nodeBounds(r.doc.selected), r.units)
+		r.info.set(name, labels, values)
+		adder.AddWidget(&r.info)
 	}
 	if r.capture.path != "" {
 		adder.AddWidget(&r.capture)
@@ -484,30 +501,30 @@ func (r *Root) Layout(context *guigui.Context, widgetBounds *guigui.WidgetBounds
 	layouter.LayoutWidget(&r.background, b)
 	layouter.LayoutWidget(&r.capture, b)
 
-	if r.sidebarHidden {
-		layouter.LayoutWidget(&r.view, b)
-		if r.doc == nil {
-			layouter.LayoutWidget(&r.placeholder, b)
-		}
-		return
+	vb := b
+	if !r.sidebarHidden {
+		// The tree and the view above a status line.
+		tw := min(r.currentTreeWidth(context), b.Dx()-u*6)
+		top := b.Min.Y + u/4
+		bottom := b.Max.Y - u
+		x := b.Min.X + u/4
+		layouter.LayoutWidget(&r.tree, image.Rect(x, top, x+tw, bottom))
+		x += tw
+		layouter.LayoutWidget(&r.splitter, image.Rect(x, top, x+u/3, bottom))
+		x += u / 3
+		vb = image.Rect(x, top, b.Max.X, bottom)
+		layouter.LayoutWidget(&r.status, image.Rect(b.Min.X+u/4, bottom, b.Max.X-u/4, b.Max.Y))
 	}
-
-	// The tree and the view above a status line.
-	tw := min(r.currentTreeWidth(context), b.Dx()-u*6)
-	top := b.Min.Y + u/4
-	bottom := b.Max.Y - u
-	x := b.Min.X + u/4
-	layouter.LayoutWidget(&r.tree, image.Rect(x, top, x+tw, bottom))
-	x += tw
-	layouter.LayoutWidget(&r.splitter, image.Rect(x, top, x+u/3, bottom))
-	x += u / 3
-	vb := image.Rect(x, top, b.Max.X, bottom)
 	layouter.LayoutWidget(&r.view, vb)
 	if r.doc == nil {
 		// The placeholder covers the 3D view.
 		layouter.LayoutWidget(&r.placeholder, vb)
 	}
-	layouter.LayoutWidget(&r.status, image.Rect(b.Min.X+u/4, bottom, b.Max.X-u/4, b.Max.Y))
+	// The selection's info panel sits in the top-right corner of the view.
+	m := u / 2
+	s := r.info.Measure(context, guigui.Constraints{})
+	s.X = min(s.X, vb.Dx()-2*m)
+	layouter.LayoutWidget(&r.info, image.Rect(vb.Max.X-m-s.X, vb.Min.Y+m, vb.Max.X-m, vb.Min.Y+m+s.Y))
 }
 
 // showAll makes every node visible.
