@@ -19,6 +19,7 @@ import (
 	"github.com/sqweek/dialog"
 
 	"github.com/AndreRenaud/stepview/internal/gltfload"
+	"github.com/AndreRenaud/stepview/internal/meshload"
 	"github.com/AndreRenaud/stepview/internal/step"
 )
 
@@ -29,11 +30,13 @@ type loadResult struct {
 	dur  time.Duration
 }
 
-// loadModel reads a STEP or glTF file.
+// loadModel reads a STEP, glTF, OBJ, STL or 3MF file.
 func loadModel(path string, progress func(string, float64)) (*step.Model, error) {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".gltf", ".glb":
 		return gltfload.LoadFile(path)
+	case ".obj", ".stl", ".3mf":
+		return meshload.LoadFile(path)
 	}
 	opt := step.DefaultOptions()
 	opt.Progress = progress
@@ -149,6 +152,7 @@ func (r *Root) openDialog() {
 			Title("Open model").
 			Filter("STEP files", "step", "stp", "p21").
 			Filter("glTF files", "gltf", "glb").
+			Filter("Mesh files", "obj", "stl", "3mf").
 			Load()
 		if err != nil {
 			if !errors.Is(err, dialog.ErrCancelled) {

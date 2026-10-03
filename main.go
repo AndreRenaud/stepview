@@ -1,4 +1,5 @@
-// Command stepview is a viewer for STEP (ISO 10303-21) and glTF models.
+// Command stepview is a viewer for STEP (ISO 10303-21), glTF, OBJ, STL and
+// 3MF models.
 //
 // Usage:
 //

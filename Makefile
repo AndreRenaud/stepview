@@ -39,7 +39,10 @@ FUZZ_TARGETS := \
 	./internal/step:FuzzLoad \
 	./internal/step:FuzzCDT \
 	./internal/step:FuzzBSplineCurve \
-	./internal/gltfload:FuzzLoad
+	./internal/gltfload:FuzzLoad \
+	./internal/meshload:FuzzSTL \
+	./internal/meshload:FuzzOBJ \
+	./internal/meshload:Fuzz3MF
 
 .PHONY: all build test fuzz check app install universal clean
 

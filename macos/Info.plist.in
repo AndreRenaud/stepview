@@ -33,6 +33,20 @@
 				<string>org.khronos.glb</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Mesh Model</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.geometry-definition-format</string>
+				<string>public.standard-tesselated-geometry-format</string>
+				<string>io.3mf.3mf</string>
+			</array>
+		</dict>
 	</array>
 	<key>CFBundleExecutable</key>
 	<string>stepview</string>
@@ -58,7 +72,7 @@
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
-	<!-- macOS declares the glTF types itself, but not STEP. -->
+	<!-- macOS declares the glTF, OBJ and STL types itself, but not STEP or 3MF. -->
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>
@@ -81,6 +95,28 @@
 				<key>public.mime-type</key>
 				<array>
 					<string>application/step</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>io.3mf.3mf</string>
+			<key>UTTypeDescription</key>
+			<string>3MF Model</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>3mf</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>model/3mf</string>
 				</array>
 			</dict>
 		</dict>

@@ -1,6 +1,6 @@
-// Command stepinfo loads a STEP file, prints statistics and the product
-// tree, and can render a preview image. It is a debugging aid for the
-// step package.
+// Command stepinfo loads a STEP (or glTF, OBJ, STL or 3MF) file, prints
+// statistics and the product tree, and can render a preview image. It is a
+// debugging aid for the loaders.
 package main
 
 import (
@@ -12,9 +12,12 @@ import (
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/AndreRenaud/stepview/internal/gltfload"
+	"github.com/AndreRenaud/stepview/internal/meshload"
 	"github.com/AndreRenaud/stepview/internal/step"
 )
 
@@ -30,7 +33,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: stepinfo [flags] file.step")
 		os.Exit(2)
 	}
-	m, err := step.LoadFile(flag.Arg(0), step.DefaultOptions())
+	m, err := load(flag.Arg(0))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -83,6 +86,16 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+}
+
+func load(path string) (*step.Model, error) {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".gltf", ".glb":
+		return gltfload.LoadFile(path)
+	case ".obj", ".stl", ".3mf":
+		return meshload.LoadFile(path)
+	}
+	return step.LoadFile(path, step.DefaultOptions())
 }
 
 func worldBox(n *step.Node, xf step.Affine) step.Box {

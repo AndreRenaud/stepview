@@ -4,7 +4,8 @@ A STEP (ISO 10303-21) model viewer written in Go, using
 [guigui](https://github.com/guigui-gui/guigui) and
 [Ebitengine](https://ebitengine.org) for the UI and rendering, and
 [sqweek/dialog](https://github.com/sqweek/dialog) for the native file dialog.
-glTF (`.gltf`/`.glb`) files can be opened too.
+glTF (`.gltf`/`.glb`), Wavefront OBJ (`.obj` with `.mtl` materials), STL
+(binary and ASCII) and 3MF files can be opened too.
 
 ```sh
 go run . [model.step]
@@ -22,7 +23,7 @@ make install    # copy the app into /Applications
 ## Using it
 
 - **Open…** chooses a file; a path on the command line is loaded at startup.
-  On macOS the app bundle also opens STEP and glTF files double-clicked in
+  On macOS the app bundle also opens any of these files double-clicked in
   Finder or dropped on its Dock icon.
 - The tree on the left shows the product structure. Click an item to select
   (highlight) it; use its checkbox to hide or show it and everything below it.
@@ -38,7 +39,7 @@ make install    # copy the app into /Applications
 - **Fit / Iso / Top / Front / Right** set the camera; **Show all** un-hides
   everything; **Wireframe** switches between shaded rendering and a
   wireframe of the model edges (B-rep face boundaries, or sharp creases for
-  glTF meshes), with the selection drawn in orange.
+  mesh formats), with the selection drawn in orange.
 
 ## How it works
 
@@ -57,6 +58,15 @@ make install    # copy the app into /Applications
   triangulated with a constrained Delaunay triangulation. Curved faces are then
   refined until the chordal error is within tolerance. Edges are sampled once
   and shared, so adjacent faces meet without cracks.
+
+`internal/gltfload` and `internal/meshload` turn glTF, OBJ, STL and 3MF
+files into the same model tree. OBJ groups and 3MF build items and
+components become tree nodes, and colours come from MTL diffuse colours, STL
+facet colours (VisCAM and Materialise conventions) and 3MF base materials and
+colour groups. Vertices are welded and, where the file has no normals,
+smoothed between triangles that meet at less than 35°. A closed mesh that is
+inside out is turned the right way round. OBJ is turned from Y up to Z up;
+OBJ and STL have no units and are taken as millimetres.
 
 The viewer (package `main`) flattens the tree and places every part's
 vertices in world space, with a fixed studio lighting rig baked into their
@@ -88,7 +98,9 @@ These environment variables are for testing the GUI non-interactively:
 
 `testdata/` has sample files from the
 [STEP Tools sample collection](https://www.steptools.com/docs/stpfiles/ap203/index.html),
-with their reference images. `go test ./...` loads all of them.
+with their reference images, and OBJ, STL and 3MF samples listed with their
+licenses in [testdata/SOURCES.md](testdata/SOURCES.md). `go test ./...` loads
+all of them.
 
 ## Limitations
 
@@ -96,5 +108,8 @@ with their reference images. `go test ./...` loads all of them.
   the four passes. A PCB with ~250k triangles takes about 8 ms per frame on
   an M1 Pro. Rendering only happens when the view changes.
 - Faces whose orientation is reversed in the file are culled as back faces.
+- OBJ polygons are fan triangulated, so concave ones may be filled wrongly.
+  Textures are ignored, as are 3MF textures, composite materials and
+  extensions other than materials and production.
 - Only B-rep and faceted geometry is shown. Wireframe, PMI and tessellated
   (AP242 `TESSELLATED_*`) data are ignored.
