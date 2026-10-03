@@ -77,7 +77,7 @@ type tmfModel struct {
 	unit      float64
 	objects   map[int]*tmfObject
 	order     []*tmfObject
-	props     map[int][][3]float32 // property group -> colours
+	props     map[int][][4]float32 // property group -> colours with alpha
 	textures  map[int]string       // texture2d id -> image part
 	texGroups map[int]*tmfTexGroup
 	build     []tmfItem
@@ -273,16 +273,17 @@ func (l *tmfLoader) mesh(part string, m *tmfModel, o *tmfObject) []*step.Mesh {
 	if me, ok := l.meshes[o]; ok {
 		return me
 	}
-	colour := func(pid, idx int) [3]float32 {
+	colour := func(pid, idx int) [4]float32 {
 		if g := m.props[pid]; idx >= 0 && idx < len(g) {
 			return g[idx]
 		}
-		return defaultColour
+		return defaultRGBA
 	}
 	var b builder
 	bad := 0
 	for _, t := range o.tris {
 		var p, c [3][3]float32
+		var a [3]float32
 		ok := true
 		for k, v := range t.v {
 			if v < 0 || v >= len(o.verts) {
@@ -306,16 +307,17 @@ func (l *tmfLoader) mesh(part string, m *tmfModel, o *tmfObject) []*step.Mesh {
 			if idx[k] < 0 {
 				idx[k] = idx[0]
 			}
-			c[k] = colour(pid, idx[k])
+			rgba := colour(pid, idx[k])
+			c[k], a[k] = [3]float32(rgba[:3]), rgba[3]
 		}
 		if g := m.texGroups[pid]; g != nil {
 			if tex, uv, ok := l.texCoords(m, g, idx); ok {
 				w := [3]float32{1, 1, 1}
-				b.addTextured(p, [3][3]float32{w, w, w}, nil, tex, &uv)
+				b.addTextured(p, [3][3]float32{w, w, w}, nil, tex, &uv, nil)
 				continue
 			}
 		}
-		b.add(p, c, nil)
+		b.addTextured(p, c, nil, nil, nil, &a)
 	}
 	if bad > 0 {
 		l.warn("%s: object %d: %d triangles with invalid vertex indices", part, o.id, bad)
@@ -354,7 +356,7 @@ func parseModel(r io.Reader) (*tmfModel, error) {
 	m := &tmfModel{
 		unit:      1,
 		objects:   map[int]*tmfObject{},
-		props:     map[int][][3]float32{},
+		props:     map[int][][4]float32{},
 		textures:  map[int]string{},
 		texGroups: map[int]*tmfTexGroup{},
 	}
@@ -502,14 +504,21 @@ func parseTransform(s string) step.Affine {
 	}
 }
 
-// parseColour reads an sRGB colour written as #RRGGBB or #RRGGBBAA.
-func parseColour(s string) [3]float32 {
+// defaultRGBA is defaultColour, opaque.
+var defaultRGBA = [4]float32{defaultColour[0], defaultColour[1], defaultColour[2], 1}
+
+// parseColour reads an sRGB colour written as #RRGGBB or #RRGGBBAA, with
+// its alpha (opacity) last.
+func parseColour(s string) [4]float32 {
 	if len(s) != 7 && len(s) != 9 || s[0] != '#' {
-		return defaultColour
+		return defaultRGBA
 	}
-	v, err := strconv.ParseUint(s[1:7], 16, 32)
+	if len(s) == 7 {
+		s += "FF"
+	}
+	v, err := strconv.ParseUint(s[1:], 16, 32)
 	if err != nil {
-		return defaultColour
+		return defaultRGBA
 	}
-	return [3]float32{float32(v>>16&255) / 255, float32(v>>8&255) / 255, float32(v&255) / 255}
+	return [4]float32{float32(v>>24) / 255, float32(v>>16&255) / 255, float32(v>>8&255) / 255, float32(v&255) / 255}
 }

@@ -143,7 +143,7 @@ func readASCIISTL(data []byte) ([]stlPart, error) {
 			for len(cols) < len(loop) {
 				cols = append(cols, defaultColour)
 			}
-			parts[len(parts)-1].b.addPolygon(loop, cols[:len(loop)], nil, nil, nil)
+			parts[len(parts)-1].b.addPolygon(loop, cols[:len(loop)], nil, nil, nil, nil)
 		}
 		loop = loop[:0]
 	}

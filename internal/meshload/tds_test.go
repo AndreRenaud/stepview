@@ -3,6 +3,7 @@ package meshload
 import (
 	"bytes"
 	"encoding/binary"
+	"math"
 	"testing"
 )
 
@@ -149,5 +150,40 @@ func Test3DSNoKeyframer(t *testing.T) {
 	}
 	if _, err := loadTDS([]byte("not a 3ds file"), "t", files(nil)); err == nil {
 		t.Error("loaded garbage")
+	}
+}
+
+func Test3DSTransparency(t *testing.T) {
+	// cubeObject's first two sides are in material "Red".
+	for _, tc := range []struct {
+		percent []byte
+		want    float32 // opacity of those sides
+	}{
+		{chunk(tdsPercentI, int16(40)), 0.6},
+		{chunk(tdsPercentF, float32(25)), 0.75},
+		{chunk(tdsPercentF, float32(250)), 0},
+		{chunk(tdsPercentI, int16(0)), 1},
+		{chunk(tdsPercentI, int16(-20)), 1},
+		{chunk(tdsPercentF, float32(math.NaN())), 1},
+	} {
+		data := chunk(tdsMain, chunk(tdsEditor,
+			chunk(tdsMaterial, chunk(tdsMatName, "Red"), chunk(tdsTransp, tc.percent)),
+			cubeObject("Cube", [6]uint32{1, 2, 4, 8, 16, 32}),
+		))
+		m, err := loadTDS(data, "t", files(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkModel(t, m)
+		me := m.Roots[0].Mesh
+		if tc.want == 1 {
+			if me.Alpha != nil {
+				t.Errorf("%g: alphas %v", tc.want, me.Alpha)
+			}
+			continue
+		}
+		if got := alphaCounts(me); got[tc.want] != 8 || got[1] != 16 {
+			t.Errorf("%g: alphas %v", tc.want, got)
+		}
 	}
 }

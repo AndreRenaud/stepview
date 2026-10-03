@@ -42,6 +42,7 @@ type document struct {
 	// renderer.
 	pos         []float32       // 3 per vertex
 	uv          []float32       // 2 per vertex, or nil when nothing is textured
+	alpha       []float32       // opacity per vertex, or nil when all is opaque
 	verts       []ebiten.Vertex // surface attributes; the renderer fills in the rest
 	visible     []int           // instances that are not hidden
 	visibleTris int
@@ -102,9 +103,11 @@ func (d *document) buildGeometry() {
 	d.pos = make([]float32, nv*3)
 	d.verts = make([]ebiten.Vertex, nv)
 	for _, in := range d.insts {
-		if textured(in.mesh) {
+		if textured(in.mesh) && d.uv == nil {
 			d.uv = make([]float32, nv*2)
-			break
+		}
+		if translucent(in.mesh) && d.alpha == nil {
+			d.alpha = make([]float32, nv)
 		}
 	}
 	parallelEach(len(d.insts), func(i int) {
@@ -129,9 +132,24 @@ func (d *document) buildGeometry() {
 		if textured(m) {
 			copy(d.uv[in.vert0*2:], m.UVs)
 		}
+		if d.alpha != nil {
+			a := d.alpha[in.vert0 : in.vert0+len(m.Positions)/3]
+			if translucent(m) {
+				copy(a, m.Alpha)
+			} else {
+				for k := range a {
+					a[k] = 1
+				}
+			}
+		}
 		d.paint(i)
 	})
 	d.updateVisible()
+}
+
+// translucent reports whether a mesh has usable per-vertex opacity.
+func translucent(m *step.Mesh) bool {
+	return m.Alpha != nil && len(m.Alpha) == len(m.Positions)/3
 }
 
 // textured reports whether a mesh has a usable texture.

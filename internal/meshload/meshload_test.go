@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/binary"
+	"image"
 	"math"
 	"os"
 	"path/filepath"
@@ -31,6 +32,7 @@ func checkModel(t testing.TB, m *step.Model) {
 				t.Fatalf("%s: %d indices", n.Name, len(me.Indices))
 			}
 			checkUVs(t, n.Name, me)
+			checkAlpha(t, n.Name, me)
 			for _, i := range me.Indices {
 				if int(i) >= nv {
 					t.Fatalf("%s: index %d out of range (%d vertices)", n.Name, i, nv)
@@ -84,6 +86,39 @@ func checkUVs(t testing.TB, name string, me *step.Mesh) {
 			t.Fatalf("%s: invalid UV %g", name, v)
 		}
 	}
+}
+
+// checkAlpha verifies that a mesh's opacities are absent, or one per
+// vertex and in [0, 1] with at least one below 1.
+func checkAlpha(t testing.TB, name string, me *step.Mesh) {
+	t.Helper()
+	if me.Alpha == nil {
+		return
+	}
+	if len(me.Alpha) != len(me.Positions)/3 {
+		t.Fatalf("%s: %d alphas for %d vertices", name, len(me.Alpha), len(me.Positions)/3)
+	}
+	if !slices.ContainsFunc(me.Alpha, func(a float32) bool { return a < 1 }) {
+		t.Fatalf("%s: opaque mesh has alphas", name)
+	}
+	for _, a := range me.Alpha {
+		if !(a >= 0 && a <= 1) {
+			t.Fatalf("%s: invalid alpha %g", name, a)
+		}
+	}
+}
+
+// alphaCounts counts a mesh's vertices by opacity, rounded to 1/1000.
+func alphaCounts(me *step.Mesh) map[float32]int {
+	out := map[float32]int{}
+	for i := range len(me.Positions) / 3 {
+		a := float32(1)
+		if me.Alpha != nil {
+			a = me.Alpha[i]
+		}
+		out[float32(math.Round(float64(a)*1000)/1000)]++
+	}
+	return out
 }
 
 // worldBox is the bounds of the whole model in world space.
@@ -190,6 +225,17 @@ func TestSampleDetails(t *testing.T) {
 	}
 	if len(colours) != 5 {
 		t.Errorf("rhombicuboctahedron: %d colours, want 5", len(colours))
+	}
+	// One of the five cubes is 17% transparent.
+	m = load("cubes_with_alpha.3ds")
+	if len(m.Roots[0].Children) != 5 {
+		t.Errorf("cubes with alpha: %d cubes", len(m.Roots[0].Children))
+	}
+	for _, c := range m.Roots[0].Children {
+		got := alphaCounts(c.Mesh)
+		if c.Name == "Quader05" && (len(got) != 1 || got[0.83] == 0) || c.Name != "Quader05" && c.Mesh.Alpha != nil {
+			t.Errorf("cubes with alpha: %s has alphas %v", c.Name, got)
+		}
 	}
 	// OBJ groups and MTL colours: the light is white, the left wall red.
 	m = load("cornell_box.obj")
@@ -426,5 +472,199 @@ func Test3MF(t *testing.T) {
 	}
 	if len(m.Warnings) != 1 {
 		t.Errorf("warnings = %q", m.Warnings)
+	}
+}
+
+func TestBuilderAlpha(t *testing.T) {
+	// An inside-out unit cube whose opacity is a function of position, so
+	// it must still match after the faces are turned the right way out.
+	alphaOf := func(p [3]float32) float32 { return 0.1 + 0.1*(p[0]+2*p[1]+4*p[2]) }
+	corners := func(i int) [3]float32 {
+		return [3]float32{float32(i & 1), float32(i >> 1 & 1), float32(i >> 2 & 1)}
+	}
+	quads := [][4]int{{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 4, 6, 2}, {1, 3, 7, 5}}
+	white := [3][3]float32{{1, 1, 1}, {1, 1, 1}, {1, 1, 1}}
+	var bl builder
+	for _, q := range quads {
+		for _, tri := range [][3]int{{q[0], q[2], q[1]}, {q[0], q[3], q[2]}} { // reversed
+			var p [3][3]float32
+			var a [3]float32
+			for k, v := range tri {
+				p[k] = corners(v)
+				a[k] = alphaOf(p[k])
+			}
+			bl.addTextured(p, white, nil, nil, nil, &a)
+		}
+	}
+	me := bl.mesh()
+	checkAlpha(t, "cube", me)
+	for i := 0; i < len(me.Positions); i += 3 {
+		p := [3]float32(me.Positions[i : i+3])
+		n := step.Vec3{X: float64(me.Normals[i]), Y: float64(me.Normals[i+1]), Z: float64(me.Normals[i+2])}
+		if vec(p).Sub(step.Vec3{X: 0.5, Y: 0.5, Z: 0.5}).Dot(n) <= 0 {
+			t.Fatalf("vertex %v has inward normal %v", p, n)
+		}
+		if a := me.Alpha[i/3]; a != alphaOf(p) {
+			t.Errorf("vertex %v has alpha %g, want %g", p, a, alphaOf(p))
+		}
+	}
+
+	// Opaque, out of range and NaN opacities allocate nothing.
+	var op builder
+	nan := float32(math.NaN())
+	quad := [][3]float32{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}
+	op.add([3][3]float32(quad[:3]), white, nil)
+	op.addTextured([3][3]float32(quad[:3]), white, nil, nil, nil, &[3]float32{1, 2, nan})
+	op.addPolygon(quad, append(white[:], white[0]), nil, nil, nil, []float32{1, 1, 1, 1})
+	if ms := op.meshes(); op.alpha != nil || len(ms) != 1 || ms[0].Alpha != nil {
+		t.Errorf("opaque: alpha %v", op.alpha)
+	}
+
+	// Corners that share a position but not an opacity stay separate;
+	// a mesh split off by texture keeps its own (here no) alpha.
+	var q builder
+	tex := &step.Texture{Name: "t", Image: image.NewGray(image.Rect(0, 0, 1, 1))}
+	q.addTextured([3][3]float32(quad[:3]), white, nil, tex, &[3][2]float32{}, nil)
+	q.addPolygon(quad, append(white[:], white[0]), nil, nil, nil, []float32{0.5, 0.5, 0.5, 0.5})
+	q.addTextured([3][3]float32{quad[1], quad[0], {1, -1, 0}}, white, nil, nil, nil, &[3]float32{-1, 0.25, 0.25})
+	ms := q.meshes()
+	if len(ms) != 2 || ms[0].Alpha != nil || ms[0].Texture != tex {
+		t.Fatalf("meshes: %+v", ms)
+	}
+	checkAlpha(t, "split", ms[1])
+	if got := alphaCounts(ms[1]); len(ms[1].Positions)/3 != 7 || got[0.5] != 4 || got[0.25] != 2 || got[0] != 1 {
+		t.Errorf("split: %d vertices, alphas %v", len(ms[1].Positions)/3, got)
+	}
+}
+
+func TestOBJAlpha(t *testing.T) {
+	obj := `mtllib m.mtl
+v 0 0 0
+v 1 0 0
+v 1 1 0
+v 0 1 0 0 0 1
+vt 0 0
+vt 1 0
+vt 1 1
+o glass
+usemtl glass
+f 1 2 3 4
+o tr
+usemtl tr
+f 1 2 3
+o both
+usemtl both
+f 1 2 3
+o halo
+usemtl halo
+f 1 2 3
+o solid
+usemtl solid
+f 1 2 3
+o textured
+usemtl textured
+f 1/1 2/2 3/3
+`
+	mtl := `newmtl glass
+Kd 1 0 0
+d 0.25
+newmtl tr
+Tr 0.6
+newmtl both
+d 0.5
+Tr 0.1
+newmtl halo
+d -halo 0.3
+newmtl solid
+d 1
+Tr 0
+newmtl textured
+map_Kd t.png
+map_d t.png
+Tr 0.5
+`
+	m, err := loadOBJ([]byte(obj), "t", files(map[string][]byte{"m.mtl": []byte(mtl), "t.png": holesPNG(t)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkModel(t, m)
+	byName := map[string]*step.Mesh{}
+	for _, c := range m.Roots[0].Children {
+		byName[c.Name] = c.Mesh
+	}
+	for name, want := range map[string]float32{"glass": 0.25, "tr": 0.4, "both": 0.9, "halo": 0.3, "textured": 0.5} {
+		me := byName[name]
+		if me == nil {
+			t.Errorf("%s: no mesh", name)
+			continue
+		}
+		if got := alphaCounts(me); len(got) != 1 || got[want] == 0 {
+			t.Errorf("%s: alphas %v, want %g", name, got, want)
+		}
+	}
+	// The vertex colour replaces the material's, not its opacity.
+	if g := byName["glass"]; g != nil && !slices.Equal(g.Colors[9:12], []float32{0, 0, 1}) {
+		t.Errorf("glass: colours %v", g.Colors)
+	}
+	if me := byName["solid"]; me == nil || me.Alpha != nil {
+		t.Errorf("solid: %+v", me)
+	}
+	if me := byName["textured"]; me == nil || me.Texture == nil || !me.Texture.Cutout {
+		t.Errorf("textured: %+v", me)
+	}
+}
+
+const tmfAlpha = `<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+ xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">
+<resources>
+<basematerials id="1"><base name="glass" displaycolor="#00FF0040"/><base name="solid" displaycolor="#0000FF"/></basematerials>
+<m:colorgroup id="2"><m:color color="#FF0000FF"/><m:color color="#FF000080"/></m:colorgroup>
+<object id="3" name="Glass" pid="1" pindex="0"><mesh>
+<vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices>
+<triangles><triangle v1="0" v2="1" v3="2"/></triangles>
+</mesh></object>
+<object id="4" name="Solid" pid="1" pindex="1"><mesh>
+<vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices>
+<triangles><triangle v1="0" v2="1" v3="2"/></triangles>
+</mesh></object>
+<object id="5" name="Mixed" pid="2"><mesh>
+<vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices>
+<triangles><triangle v1="0" v2="1" v3="2" p1="0" p2="1" p3="0"/></triangles>
+</mesh></object>
+</resources>
+<build><item objectid="3"/><item objectid="4"/><item objectid="5"/></build>
+</model>`
+
+func Test3MFAlpha(t *testing.T) {
+	data := make3MF(t, map[string]string{"_rels/.rels": tmfRels, "3D/main.model": tmfAlpha})
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := load3MF(zr, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkModel(t, m)
+	glass, solid, mixed := m.Roots[0].Children[0].Mesh, m.Roots[0].Children[1].Mesh, m.Roots[0].Children[2].Mesh
+	if got := alphaCounts(glass); got[0.251] != 3 || !slices.Equal(glass.Colors[:3], []float32{0, 1, 0}) {
+		t.Errorf("glass: alphas %v, colour %v", got, glass.Colors[:3])
+	}
+	if solid.Alpha != nil {
+		t.Errorf("solid: alphas %v", solid.Alpha)
+	}
+	// Only the second corner is translucent.
+	for i := range len(mixed.Positions) / 3 {
+		want := float32(1)
+		if mixed.Positions[i*3] == 1 {
+			want = 128.0 / 255
+		}
+		if mixed.Alpha[i] != want || mixed.Colors[i*3] != 1 {
+			t.Errorf("mixed vertex %d: alpha %g, colour %v", i, mixed.Alpha[i], mixed.Colors[i*3:i*3+3])
+		}
+	}
+	if c := parseColour("#11223344"); c != [4]float32{0x11 / 255.0, 0x22 / 255.0, 0x33 / 255.0, 0x44 / 255.0} {
+		t.Errorf("parseColour = %v", c)
 	}
 }

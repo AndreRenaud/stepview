@@ -13,7 +13,7 @@ import (
 )
 
 // LoadTDS reads an Autodesk 3D Studio (.3ds) file: its triangle meshes,
-// material diffuse colours and textures, smoothing groups, and the object
+// material diffuse colours, transparency and textures, smoothing groups, and the object
 // hierarchy from the keyframer. 3DS has no units; it is Z up and taken as
 // millimetres. Mesh vertices are stored in world space, so the hierarchy
 // only groups objects and every node has an identity transform.
@@ -39,6 +39,7 @@ const (
 	tdsMaterial   = 0xAFFF
 	tdsMatName    = 0xA000
 	tdsDiffuse    = 0xA020
+	tdsTransp     = 0xA050
 	tdsTexMap     = 0xA200
 	tdsOpacMap    = 0xA210
 	tdsMapFile    = 0xA300
@@ -50,6 +51,8 @@ const (
 	tdsColor24    = 0x0011
 	tdsLinColor24 = 0x0012
 	tdsLinColorF  = 0x0013
+	tdsPercentI   = 0x0030
+	tdsPercentF   = 0x0031
 	tdsKeyframer  = 0xB000
 	tdsObjectNode = 0xB002
 	tdsLastNode   = 0xB007
@@ -63,9 +66,10 @@ type tdsMatGroup struct {
 	faces    []uint16
 }
 
-// tdsMat is a material's diffuse colour and texture.
+// tdsMat is a material's diffuse colour, opacity and texture.
 type tdsMat struct {
 	colour        [3]float32
+	alpha         float32
 	tex, mask     string     // texture and opacity map file names
 	scale, offset [2]float32 // texture coordinate tiling and offset
 }
@@ -196,23 +200,22 @@ func loadTDS(data []byte, name string, open func(string) ([]byte, error)) (*step
 				continue
 			}
 			p := [3][3]float32{o.verts[f[0]], o.verts[f[1]], o.verts[f[2]]}
-			c, m := defaultColour, fmat[i]
+			c, a, m := defaultColour, float32(1), fmat[i]
 			if m != nil {
-				c = m.colour
+				c, a = m.colour, m.alpha
 			}
-			if tex := ftex[i]; tex != nil && int(max(f[0], f[1], f[2])) < len(o.uvs) {
+			var uv *[3][2]float32
+			if ftex[i] != nil && int(max(f[0], f[1], f[2])) < len(o.uvs) {
 				// The texture replaces the diffuse colour. Bottom left
 				// origin -> top left.
-				var uv [3][2]float32
+				uv = new([3][2]float32)
 				for k, v := range f {
 					t := o.uvs[v]
 					uv[k] = [2]float32{t[0]*m.scale[0] + m.offset[0], 1 - t[1]*m.scale[1] - m.offset[1]}
 				}
-				w := [3]float32{1, 1, 1}
-				b.addTextured(p, [3][3]float32{w, w, w}, nil, tex, &uv)
-			} else {
-				b.add(p, [3][3]float32{c, c, c}, nil)
+				c = [3]float32{1, 1, 1}
 			}
+			b.addTextured(p, [3][3]float32{c, c, c}, nil, ftex[i], uv, &[3]float32{a, a, a})
 			if b.smooth != nil && len(b.smooth) < b.triangles() {
 				b.smooth = append(b.smooth, o.smooth[i])
 			}
@@ -300,7 +303,7 @@ func loadTDS(data []byte, name string, open func(string) ([]byte, error)) (*step
 // readTDSMaterial returns a material's name, diffuse colour and textures.
 func readTDSMaterial(body []byte) (string, *tdsMat) {
 	var name string
-	m := &tdsMat{colour: defaultColour, scale: [2]float32{1, 1}}
+	m := &tdsMat{colour: defaultColour, alpha: 1, scale: [2]float32{1, 1}}
 	chunks(body, func(id uint16, body []byte) {
 		switch id {
 		case tdsMatName:
@@ -326,6 +329,15 @@ func readTDSMaterial(body []byte) (string, *tdsMat) {
 			chunks(body, func(id uint16, body []byte) {
 				if id == tdsMapFile {
 					m.mask, _ = cstring(body)
+				}
+			})
+		case tdsTransp:
+			chunks(body, func(id uint16, body []byte) {
+				switch {
+				case id == tdsPercentI && len(body) >= 2:
+					m.alpha = 1 - float32(int16(binary.LittleEndian.Uint16(body)))/100
+				case id == tdsPercentF && len(body) >= 4:
+					m.alpha = 1 - math.Float32frombits(binary.LittleEndian.Uint32(body))/100
 				}
 			})
 		case tdsDiffuse:

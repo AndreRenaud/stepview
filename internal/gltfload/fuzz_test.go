@@ -7,6 +7,7 @@ import (
 	"image/color"
 	"image/png"
 	"math"
+	"slices"
 	"testing"
 	"testing/fstest"
 
@@ -105,6 +106,10 @@ func FuzzLoad(f *testing.F) {
 	f.Add(encode(f, texturedDoc(f, "view", true, gltf.AlphaMask), true))
 	f.Add(encode(f, texturedDoc(f, "data", false, gltf.AlphaOpaque), false))
 	f.Add(encode(f, texturedDoc(f, "file", true, gltf.AlphaBlend), false))
+	blend := quadDoc()
+	blend.Materials[0].AlphaMode = gltf.AlphaBlend
+	blend.Materials[0].PBRMetallicRoughness.BaseColorFactor[3] = 0.5
+	f.Add(encode(f, blend, true))
 	// External files come from memory, never the real disk.
 	fsys := fstest.MapFS{"tex file.png": {Data: testPNG(f, true)}}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -135,6 +140,14 @@ func FuzzLoad(f *testing.F) {
 				for _, v := range n.Mesh.UVs {
 					if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
 						t.Fatalf("%s: invalid UV %g", n.Name, v)
+					}
+				}
+				if a := n.Mesh.Alpha; a != nil && (len(a) != nv || !slices.ContainsFunc(a, func(v float32) bool { return v < 1 })) {
+					t.Fatalf("%s: %d alphas for %d vertices, %v", n.Name, len(a), nv, a)
+				}
+				for _, v := range n.Mesh.Alpha {
+					if !(v >= 0 && v <= 1) {
+						t.Fatalf("%s: invalid alpha %g", n.Name, v)
 					}
 				}
 				triangles += n.Mesh.TriangleCount()

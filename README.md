@@ -76,13 +76,19 @@ paths, the wrong case or a `Maps`/`textures` subdirectory are still found.
 A texture's alpha only cuts holes when the material asks for it (glTF
 `MASK`, OBJ `map_d`, 3DS opacity maps); otherwise it is ignored.
 
+Transparency comes from STEP's `SURFACE_STYLE_TRANSPARENT`, glTF's `BLEND`
+mode, OBJ's `d`/`Tr`, 3DS material transparency and 3MF colours with
+alpha.
+
 The viewer (package `main`) flattens the tree and places every part's
 vertices in world space, with a fixed studio lighting rig baked into their
 colours. Each frame (`render.go`) projects them on all cores, drops triangles
 that face away or are off screen, cuts those crossing the near plane, and
 draws the rest, one draw call per texture. Texture coordinates travel
 divided by depth, so the shader can recover them with perspective, and
-are filtered bilinearly in the shader. Ebitengine has no depth buffer, so the nearest surface is
+are filtered bilinearly in the shader. Transparent triangles are drawn
+afterwards: sorted from far to near on the CPU, both sides of them, and
+blended over the opaque picture where they are in front of it. Ebitengine has no depth buffer, so the nearest surface is
 found in three passes that build a 24-bit depth one byte at a time with a
 "max" blend, followed by a colour pass. Picking is a CPU ray cast against the
 original triangles.
@@ -123,8 +129,11 @@ loads all of them.
   production are ignored, as are 3DS keyframer transforms (an object
   instanced more than once is shown once).
 - Only base colour textures are used, without mipmaps, so a texture seen
-  from far away can shimmer. There is no transparency: glTF `BLEND`
-  materials are drawn opaque, and cutouts use a fixed alpha of one half.
+  from far away can shimmer. Cutouts use a fixed alpha of one half.
   Textures always repeat (no clamping or decals).
+- Transparent triangles are sorted by their centres, so intersecting or
+  interleaved transparent surfaces can blend in the wrong order. In high
+  quality mode they get the simple lighting of normal mode, without
+  ambient occlusion.
 - Only B-rep and faceted geometry is shown. Wireframe, PMI and tessellated
   (AP242 `TESSELLATED_*`) data are ignored.

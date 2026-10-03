@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/AndreRenaud/stepview/internal/step"
@@ -56,8 +57,11 @@ type builder struct {
 	// uv holds texture coordinates (three per triangle) and tex the
 	// texture they refer to (one per triangle, nil where untextured); both
 	// are allocated with the first textured triangle.
-	uv      [][2]float32
-	tex     []*step.Texture
+	uv  [][2]float32
+	tex []*step.Texture
+	// alpha holds opacities (three per triangle); it is allocated with the
+	// first triangle that is not opaque.
+	alpha   []float32
 	dropped int // triangles with non-finite coordinates
 }
 
@@ -70,18 +74,37 @@ func finite(p [3]float32) bool {
 	return true
 }
 
-// add appends a triangle with per-corner colours. n holds per-corner
-// normals from the file, or is nil.
+// opacity clamps an alpha value to [0, 1], taking NaN as opaque.
+func opacity(v float32) float32 {
+	if !(v < 1) {
+		return 1
+	}
+	return max(v, 0)
+}
+
+// add appends an opaque triangle with per-corner colours. n holds
+// per-corner normals from the file, or is nil.
 func (b *builder) add(p [3][3]float32, c [3][3]float32, n *[3][3]float32) {
-	b.addTextured(p, c, n, nil, nil)
+	b.addTextured(p, c, n, nil, nil, nil)
 }
 
 // addTextured appends a triangle that is mapped with tex at the per-corner
-// texture coordinates uv; it is untextured when either is nil.
-func (b *builder) addTextured(p [3][3]float32, c [3][3]float32, n *[3][3]float32, tex *step.Texture, uv *[3][2]float32) {
+// texture coordinates uv; it is untextured when either is nil. a holds
+// per-corner opacities, or is nil when the triangle is opaque.
+func (b *builder) addTextured(p [3][3]float32, c [3][3]float32, n *[3][3]float32, tex *step.Texture, uv *[3][2]float32, a *[3]float32) {
 	if !finite(p[0]) || !finite(p[1]) || !finite(p[2]) {
 		b.dropped++
 		return
+	}
+	o := [3]float32{1, 1, 1}
+	if a != nil {
+		o = [3]float32{opacity(a[0]), opacity(a[1]), opacity(a[2])}
+	}
+	if o != [3]float32{1, 1, 1} && b.alpha == nil {
+		b.alpha = slices.Repeat([]float32{1}, len(b.pos))
+	}
+	if b.alpha != nil {
+		b.alpha = append(b.alpha, o[0], o[1], o[2])
 	}
 	if uv == nil {
 		tex = nil
@@ -114,8 +137,8 @@ func (b *builder) addTextured(p [3][3]float32, c [3][3]float32, n *[3][3]float32
 	}
 }
 
-// addPolygon fan-triangulates a convex polygon. n and uv may be nil.
-func (b *builder) addPolygon(p [][3]float32, c [][3]float32, n [][3]float32, tex *step.Texture, uv [][2]float32) {
+// addPolygon fan-triangulates a convex polygon. n, uv and a may be nil.
+func (b *builder) addPolygon(p [][3]float32, c [][3]float32, n [][3]float32, tex *step.Texture, uv [][2]float32, a []float32) {
 	for k := 2; k < len(p); k++ {
 		tp := [3][3]float32{p[0], p[k-1], p[k]}
 		tc := [3][3]float32{c[0], c[k-1], c[k]}
@@ -127,7 +150,11 @@ func (b *builder) addPolygon(p [][3]float32, c [][3]float32, n [][3]float32, tex
 		if uv != nil {
 			tuv = &[3][2]float32{uv[0], uv[k-1], uv[k]}
 		}
-		b.addTextured(tp, tc, tn, tex, tuv)
+		var ta *[3]float32
+		if a != nil {
+			ta = &[3]float32{a[0], a[k-1], a[k]}
+		}
+		b.addTextured(tp, tc, tn, tex, tuv, ta)
 	}
 }
 
@@ -203,6 +230,9 @@ func (b *builder) meshes() []*step.Mesh {
 			if b.uv != nil {
 				b.uv[i], b.uv[j] = b.uv[j], b.uv[i]
 			}
+			if b.alpha != nil {
+				b.alpha[i], b.alpha[j] = b.alpha[j], b.alpha[i]
+			}
 			pid[i], pid[j] = pid[j], pid[i]
 			for k := t * 3; k < t*3+3; k++ {
 				b.nrm[k] = [3]float32{-b.nrm[k][0], -b.nrm[k][1], -b.nrm[k][2]}
@@ -239,6 +269,7 @@ func (b *builder) meshes() []*step.Mesh {
 		p, g uint32 // position and mesh
 		n, c [3]float32
 		uv   [2]float32
+		a    float32
 	}
 	verts := make(map[vkey]uint32, len(upos))
 	var out []*step.Mesh
@@ -287,7 +318,11 @@ func (b *builder) meshes() []*step.Mesh {
 			if tex != nil {
 				uv = b.uv[i]
 			}
-			key := vkey{pid[i], g, n, b.col[i], uv}
+			a := float32(1)
+			if b.alpha != nil {
+				a = b.alpha[i]
+			}
+			key := vkey{pid[i], g, n, b.col[i], uv, a}
 			v, seen := verts[key]
 			if !seen {
 				v = uint32(len(m.Positions) / 3)
@@ -299,9 +334,18 @@ func (b *builder) meshes() []*step.Mesh {
 				if tex != nil {
 					m.UVs = append(m.UVs, uv[0], uv[1])
 				}
+				if b.alpha != nil {
+					m.Alpha = append(m.Alpha, a)
+				}
 				m.Bounds.Extend(vec(p))
 			}
 			m.Indices = append(m.Indices, v)
+		}
+	}
+	// Meshes whose triangles are all opaque have no alpha.
+	for _, m := range out {
+		if !slices.ContainsFunc(m.Alpha, func(a float32) bool { return a < 1 }) {
+			m.Alpha = nil
 		}
 	}
 	return out

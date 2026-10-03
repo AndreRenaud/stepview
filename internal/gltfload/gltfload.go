@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/qmuntal/gltf"
@@ -97,11 +98,11 @@ type loader struct {
 	warnings []string
 }
 
-// variant is an image with its Cutout flag set by a material rather than
-// by the image itself.
+// variant is an image with its Cutout and Blend flags set by a material's
+// alpha mode rather than by the image itself.
 type variant struct {
-	image  int
-	cutout bool
+	image int
+	mode  gltf.AlphaMode
 }
 
 func nodeTransform(n *gltf.Node) step.Affine {
@@ -226,9 +227,11 @@ func (l *loader) primitive(p *gltf.Primitive) (*step.Mesh, error) {
 	var pbr *gltf.PBRMetallicRoughness
 	var tex *step.Texture
 	var uvs [][2]float32
+	blend := false
 	if p.Material != nil && *p.Material >= 0 && *p.Material < len(l.doc.Materials) && l.doc.Materials[*p.Material] != nil {
 		mat := l.doc.Materials[*p.Material]
 		pbr = mat.PBRMetallicRoughness
+		blend = mat.AlphaMode == gltf.AlphaBlend
 		if pbr != nil && pbr.BaseColorFactor != nil {
 			base = *pbr.BaseColorFactor
 		}
@@ -281,6 +284,24 @@ func (l *loader) primitive(p *gltf.Primitive) (*step.Mesh, error) {
 		}
 		m.Colors = append(m.Colors, c[0], c[1], c[2])
 	}
+	if blend {
+		// Opacity is the base colour factor's alpha times the vertex
+		// colour's.
+		m.Alpha = make([]float32, len(pos))
+		for k := range pos {
+			a := base[3]
+			if k < len(cols) {
+				a *= float64(cols[k][3]) / 255
+			}
+			m.Alpha[k] = 1
+			if a < 1 {
+				m.Alpha[k] = float32(max(a, 0))
+			}
+		}
+		if !slices.ContainsFunc(m.Alpha, func(a float32) bool { return a < 1 }) {
+			m.Alpha = nil
+		}
+	}
 	if tex != nil {
 		m.Texture = tex
 		m.UVs = make([]float32, 0, len(uvs)*2)
@@ -312,8 +333,9 @@ func attribute(p *gltf.Primitive, name string) int {
 }
 
 // texture returns a material's base colour texture and the index of the
-// texture coordinate set it uses, or nil. Cutout follows the material's
-// alpha mode: blending is not supported, so only masks cut holes.
+// texture coordinate set it uses, or nil. Its alpha follows the material's
+// alpha mode: masks cut holes (Cutout), blending makes it opacity (Blend),
+// and opaque materials ignore it.
 func (l *loader) texture(mat *gltf.Material) (*step.Texture, int) {
 	pbr := mat.PBRMetallicRoughness
 	if pbr == nil || pbr.BaseColorTexture == nil {
@@ -328,11 +350,12 @@ func (l *loader) texture(mat *gltf.Material) (*step.Texture, int) {
 	if tex == nil {
 		return nil, 0
 	}
-	if cutout := mat.AlphaMode == gltf.AlphaMask; tex.Cutout != cutout {
-		v := variant{src, cutout}
+	cutout, blend := mat.AlphaMode == gltf.AlphaMask, mat.AlphaMode == gltf.AlphaBlend
+	if tex.Cutout != cutout || tex.Blend != blend {
+		v := variant{src, mat.AlphaMode}
 		if l.variants[v] == nil {
 			c := *tex
-			c.Cutout = cutout
+			c.Cutout, c.Blend = cutout, blend
 			l.variants[v] = &c
 		}
 		tex = l.variants[v]

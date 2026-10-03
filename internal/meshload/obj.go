@@ -13,8 +13,8 @@ import (
 	"github.com/AndreRenaud/stepview/internal/step"
 )
 
-// LoadOBJ reads a Wavefront OBJ file and the diffuse colours and textures
-// from its MTL material libraries. OBJ has no units and is conventionally
+// LoadOBJ reads a Wavefront OBJ file and the diffuse colours, opacities and
+// textures from its MTL material libraries. OBJ has no units and is conventionally
 // Y up, so the model is turned to Z up and its coordinates are used as
 // millimetres.
 func LoadOBJ(path string) (*step.Model, error) {
@@ -30,11 +30,16 @@ type objGroup struct {
 	b    builder
 }
 
-// objMaterial is an MTL material's diffuse colour and texture.
+// objMaterial is an MTL material's diffuse colour, opacity and texture.
 type objMaterial struct {
 	colour        [3]float32
+	alpha         float32    // d, or 1 - Tr
 	tex, mask     string     // map_Kd and map_d file names
 	scale, offset [2]float32 // map_Kd -s and -o
+}
+
+func newOBJMaterial() *objMaterial {
+	return &objMaterial{colour: defaultColour, alpha: 1, scale: [2]float32{1, 1}}
 }
 
 // loadOBJ parses an OBJ file; open reads a material library or texture
@@ -48,7 +53,7 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 		uvs      [][2]float32
 		mats     = map[string]*objMaterial{}
 		missing  = map[string]bool{}
-		mat      = &objMaterial{colour: defaultColour, scale: [2]float32{1, 1}}
+		mat      = newOBJMaterial()
 		tex      *step.Texture
 		groups   []*objGroup
 		byName   = map[string]*objGroup{}
@@ -104,6 +109,7 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 
 	var fp, fc, fn [][3]float32
 	var fuv [][2]float32
+	var fa []float32
 	var fv []int
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
@@ -145,7 +151,7 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 				nrm = append(nrm, [3]float32{})
 			}
 		case "f":
-			fp, fc, fn, fuv, fv = fp[:0], fc[:0], fn[:0], fuv[:0], fv[:0]
+			fp, fc, fn, fuv, fa, fv = fp[:0], fc[:0], fn[:0], fuv[:0], fa[:0], fv[:0]
 			ok, allNrm, allUV := len(f) >= 4, true, tex != nil
 			for _, c := range f[1:] {
 				parts := strings.Split(c, "/")
@@ -198,11 +204,12 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 				} else {
 					fc = append(fc, base)
 				}
+				fa = append(fa, mat.alpha)
 			}
 			if !allNrm {
 				n = nil
 			}
-			cur.b.addPolygon(fp, fc, n, ftex, uv)
+			cur.b.addPolygon(fp, fc, n, ftex, uv, fa)
 		case "o":
 			object, group = strings.Join(f[1:], " "), ""
 			selectGroup()
@@ -213,7 +220,7 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 			mn := strings.Join(f[1:], " ")
 			m, ok := mats[mn]
 			if !ok {
-				m = &objMaterial{colour: defaultColour, scale: [2]float32{1, 1}}
+				m = newOBJMaterial()
 				if !missing[mn] {
 					missing[mn] = true
 					warnings = append(warnings, fmt.Sprintf("material %q not found", mn))
@@ -279,8 +286,8 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 	return finish(name, []*step.Node{root}, warnings), nil
 }
 
-// readMTL adds the diffuse colours (Kd) and textures (map_Kd, with map_d
-// as its alpha) of a material library to mats.
+// readMTL adds the diffuse colours (Kd), opacities (d or Tr) and textures
+// (map_Kd, with map_d as its alpha) of a material library to mats.
 func readMTL(data []byte, mats map[string]*objMaterial) {
 	cur := &objMaterial{}
 	sc := bufio.NewScanner(bytes.NewReader(data))
@@ -295,12 +302,27 @@ func readMTL(data []byte, mats map[string]*objMaterial) {
 		}
 		switch f[0] {
 		case "newmtl":
-			cur = &objMaterial{colour: defaultColour, scale: [2]float32{1, 1}}
+			cur = newOBJMaterial()
 			mats[strings.Join(f[1:], " ")] = cur
 		case "map_Kd":
 			cur.tex, cur.scale, cur.offset = parseMap(f[1:])
 		case "map_d":
 			cur.mask, _, _ = parseMap(f[1:])
+		case "d", "Tr":
+			// "d -halo" fades with the viewing angle, which is ignored.
+			g := f[1:]
+			if len(g) > 0 && g[0] == "-halo" {
+				g = g[1:]
+			}
+			if len(g) == 0 {
+				break
+			}
+			if v, err := strconv.ParseFloat(g[0], 32); err == nil {
+				if f[0] == "Tr" {
+					v = 1 - v
+				}
+				cur.alpha = float32(v)
+			}
 		case "Kd":
 			var c [3]float32
 			n := 0

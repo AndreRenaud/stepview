@@ -43,6 +43,11 @@ type Mesh struct {
 	// top left corner, repeating outside [0, 1].
 	Texture *Texture
 	UVs     []float32
+
+	// Alpha is the opacity of each vertex, or nil when the mesh is opaque.
+	// Triangles with a corner below 1 are drawn blended, after everything
+	// opaque.
+	Alpha []float32
 }
 
 // Texture is an image applied to a mesh's surface.
@@ -50,8 +55,11 @@ type Texture struct {
 	Name  string      // for messages, typically the file name
 	Image image.Image // at most MaxTextureSize pixels on a side
 	// Cutout is set when the image's alpha marks holes in the surface:
-	// fragments where it is below one half are not drawn.
+	// fragments where it is below one half are not drawn. Blend is set
+	// instead when its alpha is opacity, multiplying the vertex alpha; the
+	// whole mesh is then drawn blended. With neither, alpha is ignored.
 	Cutout bool
+	Blend  bool
 }
 
 // MaxTextureSize bounds texture images, which are scaled down to fit.
@@ -150,7 +158,7 @@ type loader struct {
 	nauoByPD   map[int][]*Entity  // parent PD -> NAUOs
 	nauoXform  map[int]Affine     // NAUO -> child-to-parent transform
 	childPDs   map[int]bool       // PDs used as a component
-	colors     map[int][3]float32 // styled item -> colour
+	colors     map[int][4]float32 // styled item -> colour and opacity
 	ctxUnits   map[int][2]float64 // context -> (mm per unit, radians per unit)
 	jobs       []*solidJob
 	jobByItem  map[int]*solidJob
@@ -180,7 +188,7 @@ func newLoader(f *File, opt Options) *loader {
 		nauoByPD:  map[int][]*Entity{},
 		nauoXform: map[int]Affine{},
 		childPDs:  map[int]bool{},
-		colors:    map[int][3]float32{},
+		colors:    map[int][4]float32{},
 		ctxUnits:  map[int][2]float64{},
 		jobByItem: map[int]*solidJob{},
 	}
@@ -821,6 +829,40 @@ func (l *loader) styleColour(v Value, depth int, surfaceOnly bool) ([3]float32, 
 	return [3]float32{}, false
 }
 
+// styleOpacity finds the opacity of a surface style: one minus the
+// transparency of a SURFACE_STYLE_TRANSPARENT among its rendering
+// properties, or 1.
+func (l *loader) styleOpacity(v Value, depth int) float32 {
+	if depth > 12 {
+		return 1
+	}
+	if v.Kind == KindList {
+		for _, x := range v.List {
+			if a := l.styleOpacity(x, depth+1); a < 1 {
+				return a
+			}
+		}
+		return 1
+	}
+	e := l.f.Ref(v)
+	if e == nil {
+		return 1
+	}
+	switch e.Type {
+	case "PRESENTATION_STYLE_ASSIGNMENT", "PRESENTATION_STYLE_BY_CONTEXT":
+		return l.styleOpacity(e.Arg(0), depth+1)
+	case "SURFACE_STYLE_USAGE", "SURFACE_SIDE_STYLE":
+		return l.styleOpacity(e.Arg(1), depth+1)
+	case "SURFACE_STYLE_RENDERING_WITH_PROPERTIES":
+		return l.styleOpacity(e.Arg(2), depth+1)
+	case "SURFACE_STYLE_TRANSPARENT":
+		if t := e.Arg(0).AsFloat(); t > 0 && t <= 1 {
+			return float32(1 - t)
+		}
+	}
+	return 1
+}
+
 func (l *loader) collectColors() {
 	apply := func(e *Entity) {
 		args := e.Args
@@ -834,7 +876,7 @@ func (l *loader) collectColors() {
 		if !ok {
 			return
 		}
-		l.colors[args[2].Ref] = c
+		l.colors[args[2].Ref] = [4]float32{c[0], c[1], c[2], l.styleOpacity(args[1], 0)}
 	}
 	for _, e := range l.f.OfType("STYLED_ITEM") {
 		apply(e)
@@ -852,7 +894,7 @@ type faceTask struct {
 	job   int
 	face  int
 	flip  bool
-	color [3]float32
+	color [4]float32 // with opacity
 	mesh  *faceMesh
 }
 
@@ -864,7 +906,7 @@ type edgeTask struct {
 	done     bool
 }
 
-var defaultColour = [3]float32{0.72, 0.73, 0.76}
+var defaultColour = [4]float32{0.72, 0.73, 0.76, 1}
 
 func (l *loader) tessellate(progress func(string, float64)) {
 	var faces []*faceTask
@@ -1059,6 +1101,11 @@ func (l *loader) tessellate(progress func(string, float64)) {
 		m := &Mesh{Bounds: EmptyBox()}
 		s := j.lenScale
 		for _, fi := range jobFaces[ji] {
+			if ft := faces[fi]; ft.mesh != nil && ft.color[3] < 1 && m.Alpha == nil {
+				m.Alpha = []float32{} // filled below; opaque meshes keep none
+			}
+		}
+		for _, fi := range jobFaces[ji] {
 			ft := faces[fi]
 			if ft.mesh == nil {
 				continue
@@ -1075,6 +1122,9 @@ func (l *loader) tessellate(progress func(string, float64)) {
 				m.Positions = append(m.Positions, float32(ps.X), float32(ps.Y), float32(ps.Z))
 				m.Normals = append(m.Normals, float32(n.X), float32(n.Y), float32(n.Z))
 				m.Colors = append(m.Colors, ft.color[0], ft.color[1], ft.color[2])
+				if m.Alpha != nil {
+					m.Alpha = append(m.Alpha, ft.color[3])
+				}
 			}
 			t := ft.mesh.tris
 			for k := 0; k+2 < len(t); k += 3 {

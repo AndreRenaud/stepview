@@ -236,7 +236,7 @@ func TestBuilderTextures(t *testing.T) {
 				uv[k] = uvOf(p[k])
 			}
 			tex := []*step.Texture{a, a, nil, nil, b, b}[s]
-			bl.addTextured(p, white, nil, tex, &uv)
+			bl.addTextured(p, white, nil, tex, &uv, nil)
 		}
 	}
 	ms := bl.meshes()
@@ -269,8 +269,8 @@ func TestBuilderTextures(t *testing.T) {
 	// UVs become zero.
 	var q builder
 	nan := float32(math.NaN())
-	q.addTextured([3][3]float32{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}}, white, nil, a, &[3][2]float32{{0, 0}, {1, 0}, {1, 1}})
-	q.addTextured([3][3]float32{{0, 0, 0}, {1, 1, 0}, {0, 1, 0}}, white, nil, a, &[3][2]float32{{5, 5}, {1, 1}, {nan, 0}})
+	q.addTextured([3][3]float32{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}}, white, nil, a, &[3][2]float32{{0, 0}, {1, 0}, {1, 1}}, nil)
+	q.addTextured([3][3]float32{{0, 0, 0}, {1, 1, 0}, {0, 1, 0}}, white, nil, a, &[3][2]float32{{5, 5}, {1, 1}, {nan, 0}}, nil)
 	ms = q.meshes()
 	if len(ms) != 1 || len(ms[0].Positions)/3 != 5 {
 		t.Fatalf("seam: %+v", ms)

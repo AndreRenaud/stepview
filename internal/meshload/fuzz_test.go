@@ -38,6 +38,7 @@ func FuzzOBJ(f *testing.F) {
 	addSamples(f, ".obj")
 	f.Add([]byte("mtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0 0 1 0\nvn 0 0 1\ng a\nusemtl x\nf 1//1 2//1 -1//1\ng b\nf 1/1 2 3 \\\n 1\n\x00newmtl x\nKd 1 0.5\n"))
 	f.Add([]byte("mtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvt 0 0\nvt 1 0 0\nvt 1 1\nusemtl x\nf 1/1 2/2 3/3\nusemtl y\nf 1/-1 2/-2 3/-3\nf 1 2 3\n\x00newmtl x\nmap_Kd -s 2 2 -clamp on t.png\nnewmtl y\nKd 1 0 0\nmap_Kd -o 0.5 t.png\nmap_d t.png\n\x00" + string(halfPNG(f))))
+	f.Add([]byte("mtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nusemtl a\nf 1 2 3\nusemtl b\nf 3 2 1\n\x00newmtl a\nd -halo 0.5\nnewmtl b\nTr 0.25\nd nan\n"))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		parts := bytes.SplitN(data, []byte{0}, 3)
 		parts = append(parts, nil, nil)
@@ -70,6 +71,7 @@ func Fuzz3MF(f *testing.F) {
 	}
 	f.Add([]byte(tmfRoot), []byte(tmfPart))
 	f.Add([]byte(tmfTextured), []byte(tmfPart))
+	f.Add([]byte(tmfAlpha), []byte(tmfPart))
 	tex := string(opaquePNG(f))
 	f.Fuzz(func(t *testing.T, root, part []byte) {
 		data := make3MF(t, map[string]string{
@@ -92,6 +94,10 @@ func Fuzz3DS(f *testing.F) {
 	addSamples(f, ".3ds")
 	f.Add(sample3DS())
 	f.Add(texturedTDS())
+	f.Add(chunk(tdsMain, chunk(tdsEditor,
+		chunk(tdsMaterial, chunk(tdsMatName, "Red"), chunk(tdsTransp, chunk(tdsPercentF, float32(30)))),
+		cubeObject("Cube", [6]uint32{1, 2, 4, 8, 16, 32}),
+	)))
 	// Every texture is the same image.
 	tex := halfPNG(f)
 	open := func(string) ([]byte, error) { return tex, nil }

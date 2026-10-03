@@ -29,6 +29,7 @@ separate texture files are kept in a directory each.
 | `sphere_logo.3mf` | materials extension `texture2d` and `texture2dgroup`, mixed with a colour group | [3mf-samples](https://github.com/3MFConsortium/3mf-samples/blob/master/examples/material/sphere_logo.3mf) | 3MF Consortium | BSD-2-Clause (below) |
 | `texture_coordinate_test.glb` | base colour texture embedded in a buffer view; checks UV orientation | [glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/TextureCoordinateTest) (`glTF-Binary/TextureCoordinateTest.glb`) | Analytical Graphics, Inc. (Ed Mackey) | CC0 |
 | `avocado/Avocado.gltf`, `Avocado.bin`, `Avocado_*.png` | external base colour, normal and metallic-roughness images. The images were scaled down from 2048 px to 512 px (base colour) and 256 px (the others) to keep the repository small. | [glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Avocado) (`glTF/`) | Microsoft | CC0 |
+| `alpha_blend_mode_test/AlphaBlendModeTest.gltf`, `AlphaBlendModeTest.bin`, `AlphaBlendLabels.png`, `MatBed_*.jpg` | `OPAQUE`, `MASK` (with cutoffs) and `BLEND` materials sharing one base colour texture whose alpha is a ramp. The `MatBed_*.jpg` images were scaled down from 2048 px to 512 px (base colour) and 256 px (the others) to keep the repository small. | [glTF-Sample-Assets](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/AlphaBlendModeTest) (`glTF/`) | Analytical Graphics, Inc. (Ed Mackey) | CC BY 4.0 |
 
 ## 3mf-samples license
 

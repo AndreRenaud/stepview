@@ -14,9 +14,9 @@ import (
 //
 // Screen-space passes then compute ambient occlusion at the output
 // resolution and blur it, light every surface with a physically based
-// model (into depth[2], which is no longer needed), and reduce the result
-// to the output, either by averaging 2×2 samples or with FXAA, adding film
-// grain on the way.
+// model, blend in the transparent surfaces (lit as they are drawn, and
+// tested against depth[2]), and reduce the result to the output, either by
+// averaging 2×2 samples or with FXAA, adding film grain on the way.
 //
 // View space here has x right, y up and z towards the viewer.
 
@@ -425,7 +425,8 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4) vec4 {
 type hqPasses struct {
 	ssao, blur, composite, fxaa, resolve *ebiten.Shader
 	ao, aoBlur                           *ebiten.Image
-	frame                                int // counts renders, to vary the grain
+	lit                                  *ebiten.Image // the shaded G-buffer
+	frame                                int           // counts renders, to vary the grain
 }
 
 // grainAmount is the film grain's peak-to-peak strength in the high
@@ -453,6 +454,7 @@ func (h *hqPasses) render(r *renderer, c, gc *camera, ss int, opt renderOptions)
 	h.frame++
 	fitImage(&h.ao, c.w, c.h)
 	fitImage(&h.aoBlur, c.w, c.h)
+	fitImage(&h.lit, gc.w, gc.h)
 	right, up, back := gc.right, gc.up, gc.back
 	u := map[string]any{
 		"SS":        float32(ss),
@@ -471,16 +473,19 @@ func (h *hqPasses) render(r *renderer, c, gc *camera, ss int, opt renderOptions)
 	}
 	fullscreen(h.ao, h.ssao, u, r.depth[2], r.depth[1])
 	fullscreen(h.aoBlur, h.blur, u, h.ao, r.depth[2])
-	fullscreen(r.depth[2], h.composite, u, r.depth[0], r.depth[1], h.aoBlur)
+	fullscreen(h.lit, h.composite, u, r.depth[0], r.depth[1], h.aoBlur)
+	// Transparent surfaces are lit simply, as they are drawn, and blended
+	// in before the picture is reduced.
+	r.drawTransparent(gc, h.lit)
 	g := map[string]any{
 		"GrainAmount": float32(grainAmount),
 		"GrainSize":   max(1, opt.grainSize),
 		"GrainSeed":   float32(h.frame % 97),
 	}
 	if ss == 1 {
-		fullscreen(r.color, h.fxaa, g, r.depth[2])
+		fullscreen(r.color, h.fxaa, g, h.lit)
 	} else {
-		fullscreen(r.color, h.resolve, g, r.depth[2])
+		fullscreen(r.color, h.resolve, g, h.lit)
 	}
 }
 

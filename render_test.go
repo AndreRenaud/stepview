@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/AndreRenaud/stepview/internal/step"
@@ -164,5 +165,70 @@ func TestTexturePixels(t *testing.T) {
 	}
 	if got := px.RGBAAt(0, 0); got != (color.RGBA{200, 100, 50, 255}) {
 		t.Errorf("cutout texture: opaque pixel became %v", got)
+	}
+}
+
+func TestProjectSortsTransparent(t *testing.T) {
+	root := &step.Node{Name: "root", Local: step.Identity()}
+	add := func(z float32, alpha float32, flip bool) {
+		m := quadMesh(z, nil)
+		if alpha < 1 {
+			m.Alpha = []float32{alpha, alpha, alpha, alpha}
+		}
+		if flip { // facing down, away from a camera above
+			m.Indices = []uint32{0, 2, 1, 0, 3, 2}
+		}
+		root.Children = append(root.Children, &step.Node{Name: "q", Local: step.Identity(), Mesh: m})
+	}
+	add(0, 1, false)   // opaque floor
+	add(2, 0.5, false) // transparent, near the camera
+	add(1, 0.25, true) // transparent and facing away: still drawn
+	add(3, 1, true)    // opaque and facing away: culled
+	d := newDocument("quads", &step.Model{Roots: []*step.Node{root}})
+	o := defaultOrbit()
+	o.target = d.bounds.Center()
+	o.dist = d.bounds.Diag() * 3
+	o.pitch = 60 * math.Pi / 180 // looking down
+	c := o.camera(800, 600)
+	var r renderer
+	_, idx := r.project(d, &c)
+	if len(idx) != 6 {
+		t.Errorf("drew %d opaque triangles, want 2", len(idx)/3)
+	}
+	if len(r.tverts) != 4*3 || len(r.tindices) != 4*3 {
+		t.Fatalf("%d transparent vertices, want 12", len(r.tverts))
+	}
+	// Far to near: the back-facing quad at height 1 before the one at 2.
+	last := float32(math.Inf(1))
+	for k := 0; k < len(r.tverts); k += 3 {
+		var z float32
+		for _, v := range r.tverts[k : k+3] {
+			z += 1 / (v.Custom0*r.depthA + r.depthB)
+		}
+		if z > last+1e-3 {
+			t.Fatalf("triangle %d is farther than the one before", k/3)
+		}
+		last = z
+		want := float32(0.25)
+		if k >= 6 {
+			want = 0.5
+		}
+		if a := r.tverts[k].ColorA; a != want {
+			t.Errorf("triangle %d has opacity %v, want %v", k/3, a, want)
+		}
+	}
+	for _, i := range r.tindices {
+		if int(i) >= len(r.tverts) {
+			t.Fatalf("index %d out of range", i)
+		}
+	}
+}
+
+func TestRadixSortHigh(t *testing.T) {
+	a := []uint64{3<<32 | 0, 1<<32 | 1, 3<<32 | 2, 0xffffffff<<32 | 3, 0<<32 | 4, 1<<32 | 5}
+	radixSortHigh(a, make([]uint64, len(a)))
+	want := []uint64{0<<32 | 4, 1<<32 | 1, 1<<32 | 5, 3<<32 | 0, 3<<32 | 2, 0xffffffff<<32 | 3}
+	if !slices.Equal(a, want) {
+		t.Errorf("sorted to %x, want %x", a, want)
 	}
 }

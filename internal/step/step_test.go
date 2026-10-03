@@ -2,7 +2,9 @@ package step
 
 import (
 	"math"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -247,5 +249,55 @@ func TestModelScale(t *testing.T) {
 	})
 	if d := box.Diag(); d < 10 || d > 1e5 {
 		t.Errorf("unexpected model size %g mm", d)
+	}
+}
+
+func TestTransparency(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "block.stp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := Load(data, DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	walk(m.Roots[0], func(n *Node) {
+		if n.Mesh != nil && n.Mesh.Alpha != nil {
+			t.Errorf("opaque model has alpha")
+		}
+	})
+	// Style the block's solid blue and 75% transparent.
+	style := `#9001=COLOUR_RGB('',0.2,0.4,0.9);
+#9002=SURFACE_STYLE_TRANSPARENT(0.75);
+#9003=SURFACE_STYLE_RENDERING_WITH_PROPERTIES(.NORMAL_SHADING.,#9001,(#9002));
+#9004=SURFACE_SIDE_STYLE('',(#9003));
+#9005=SURFACE_STYLE_USAGE(.BOTH.,#9004);
+#9006=PRESENTATION_STYLE_ASSIGNMENT((#9005));
+#9007=STYLED_ITEM('',(#9006),#82);
+`
+	s := string(data)
+	i := strings.LastIndex(s, "ENDSEC;")
+	m, err = Load([]byte(s[:i]+style+s[i:]), DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	meshes := 0
+	walk(m.Roots[0], func(n *Node) {
+		me := n.Mesh
+		if me == nil {
+			return
+		}
+		meshes++
+		if len(me.Alpha) != len(me.Positions)/3 {
+			t.Fatalf("%d alphas for %d vertices", len(me.Alpha), len(me.Positions)/3)
+		}
+		for i, a := range me.Alpha {
+			if math.Abs(float64(a)-0.25) > 1e-6 || math.Abs(float64(me.Colors[i*3+2])-0.9) > 1e-6 {
+				t.Fatalf("vertex %d: colour %v alpha %v", i, me.Colors[i*3:i*3+3], a)
+			}
+		}
+	})
+	if meshes == 0 {
+		t.Fatal("no meshes")
 	}
 }
