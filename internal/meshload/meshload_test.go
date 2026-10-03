@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -29,6 +30,7 @@ func checkModel(t testing.TB, m *step.Model) {
 			if len(me.Indices)%3 != 0 {
 				t.Fatalf("%s: %d indices", n.Name, len(me.Indices))
 			}
+			checkUVs(t, n.Name, me)
 			for _, i := range me.Indices {
 				if int(i) >= nv {
 					t.Fatalf("%s: index %d out of range (%d vertices)", n.Name, i, nv)
@@ -61,6 +63,29 @@ func checkModel(t testing.TB, m *step.Model) {
 	}
 }
 
+// checkUVs verifies that a mesh has texture coordinates exactly when it
+// has a texture.
+func checkUVs(t testing.TB, name string, me *step.Mesh) {
+	t.Helper()
+	if me.Texture == nil {
+		if len(me.UVs) != 0 {
+			t.Fatalf("%s: %d UVs without a texture", name, len(me.UVs))
+		}
+		return
+	}
+	if me.Texture.Image == nil {
+		t.Fatalf("%s: texture has no image", name)
+	}
+	if len(me.UVs) != len(me.Positions)/3*2 {
+		t.Fatalf("%s: %d UVs for %d vertices", name, len(me.UVs), len(me.Positions)/3)
+	}
+	for _, v := range me.UVs {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			t.Fatalf("%s: invalid UV %g", name, v)
+		}
+	}
+}
+
 // worldBox is the bounds of the whole model in world space.
 func worldBox(m *step.Model) step.Box {
 	b := step.EmptyBox()
@@ -82,16 +107,23 @@ func worldBox(m *step.Model) step.Box {
 
 func near(a, b step.Vec3) bool { return a.Sub(b).Len() < 1e-4 }
 
+// sampleFiles lists the test data files with the given extension, at the
+// top level or in a directory of their own (with their textures).
+func sampleFiles(ext string) []string {
+	top, _ := filepath.Glob(filepath.Join("..", "..", "testdata", "*"+ext))
+	sub, _ := filepath.Glob(filepath.Join("..", "..", "testdata", "*", "*"+ext))
+	return append(top, sub...)
+}
+
 func TestLoadSamples(t *testing.T) {
-	var files []string
-	for _, ext := range []string{"obj", "stl", "3mf"} {
-		f, _ := filepath.Glob(filepath.Join("..", "..", "testdata", "*."+ext))
-		files = append(files, f...)
+	var paths []string
+	for _, ext := range []string{".obj", ".stl", ".3mf", ".3ds"} {
+		paths = append(paths, sampleFiles(ext)...)
 	}
-	if len(files) == 0 {
+	if len(paths) == 0 {
 		t.Fatal("no test data")
 	}
-	for _, path := range files {
+	for _, path := range paths {
 		t.Run(filepath.Base(path), func(t *testing.T) {
 			m, err := LoadFile(path)
 			if err != nil {
@@ -101,8 +133,29 @@ func TestLoadSamples(t *testing.T) {
 				t.Fatal("no triangles")
 			}
 			checkModel(t, m)
+			if textured[filepath.Base(path)] && !hasTexture(m) {
+				t.Errorf("no textures (warnings %q)", m.Warnings)
+			}
 		})
 	}
+}
+
+// textured lists the samples that should load with textures.
+var textured = map[string]bool{
+	"spot.obj":                      true,
+	"cube_with_diffuse_texture.3ds": true,
+	"sphere_logo.3mf":               true,
+}
+
+func hasTexture(m *step.Model) bool {
+	var walk func(n *step.Node) bool
+	walk = func(n *step.Node) bool {
+		if n.Mesh != nil && n.Mesh.Texture != nil {
+			return true
+		}
+		return slices.ContainsFunc(n.Children, walk)
+	}
+	return slices.ContainsFunc(m.Roots, walk)
 }
 
 func TestSampleDetails(t *testing.T) {

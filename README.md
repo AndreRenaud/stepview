@@ -5,7 +5,7 @@ A STEP (ISO 10303-21) model viewer written in Go, using
 [Ebitengine](https://ebitengine.org) for the UI and rendering, and
 [sqweek/dialog](https://github.com/sqweek/dialog) for the native file dialog.
 glTF (`.gltf`/`.glb`), Wavefront OBJ (`.obj` with `.mtl` materials), STL
-(binary and ASCII) and 3MF files can be opened too.
+(binary and ASCII), 3MF and 3D Studio (`.3ds`) files can be opened too.
 
 ```sh
 go run . [model.step]
@@ -59,20 +59,30 @@ make install    # copy the app into /Applications
   refined until the chordal error is within tolerance. Edges are sampled once
   and shared, so adjacent faces meet without cracks.
 
-`internal/gltfload` and `internal/meshload` turn glTF, OBJ, STL and 3MF
-files into the same model tree. OBJ groups and 3MF build items and
-components become tree nodes, and colours come from MTL diffuse colours, STL
-facet colours (VisCAM and Materialise conventions) and 3MF base materials and
-colour groups. Vertices are welded and, where the file has no normals,
-smoothed between triangles that meet at less than 35°. A closed mesh that is
+`internal/gltfload` and `internal/meshload` turn glTF, OBJ, STL, 3MF and 3DS
+files into the same model tree. OBJ groups, 3MF build items and components,
+and the 3DS keyframer hierarchy become tree nodes. Colours come from MTL and
+3DS material diffuse colours, STL facet colours (VisCAM and Materialise
+conventions) and 3MF base materials and colour groups. Vertices are welded
+and, where the file has no normals, smoothed using 3DS smoothing groups or
+else between triangles that meet at less than 35°. A closed mesh that is
 inside out is turned the right way round. OBJ is turned from Y up to Z up;
-OBJ and STL have no units and are taken as millimetres.
+OBJ, STL and 3DS have no units and are taken as millimetres.
+
+Base colour textures are read from glTF, OBJ (`map_Kd`), 3DS and 3MF
+(`texture2dgroup`) files, in PNG, JPEG, GIF, BMP, TIFF, WebP or TGA, and
+scaled down to at most 4096 pixels. Texture references that use Windows
+paths, the wrong case or a `Maps`/`textures` subdirectory are still found.
+A texture's alpha only cuts holes when the material asks for it (glTF
+`MASK`, OBJ `map_d`, 3DS opacity maps); otherwise it is ignored.
 
 The viewer (package `main`) flattens the tree and places every part's
 vertices in world space, with a fixed studio lighting rig baked into their
 colours. Each frame (`render.go`) projects them on all cores, drops triangles
 that face away or are off screen, cuts those crossing the near plane, and
-draws the rest. Ebitengine has no depth buffer, so the nearest surface is
+draws the rest, one draw call per texture. Texture coordinates travel
+divided by depth, so the shader can recover them with perspective, and
+are filtered bilinearly in the shader. Ebitengine has no depth buffer, so the nearest surface is
 found in three passes that build a 24-bit depth one byte at a time with a
 "max" blend, followed by a colour pass. Picking is a CPU ray cast against the
 original triangles.
@@ -98,9 +108,9 @@ These environment variables are for testing the GUI non-interactively:
 
 `testdata/` has sample files from the
 [STEP Tools sample collection](https://www.steptools.com/docs/stpfiles/ap203/index.html),
-with their reference images, and OBJ, STL and 3MF samples listed with their
-licenses in [testdata/SOURCES.md](testdata/SOURCES.md). `go test ./...` loads
-all of them.
+with their reference images, and OBJ, STL, 3MF and 3DS samples listed with
+their licenses in [testdata/SOURCES.md](testdata/SOURCES.md). `go test ./...`
+loads all of them.
 
 ## Limitations
 
@@ -109,7 +119,12 @@ all of them.
   an M1 Pro. Rendering only happens when the view changes.
 - Faces whose orientation is reversed in the file are culled as back faces.
 - OBJ polygons are fan triangulated, so concave ones may be filled wrongly.
-  Textures are ignored, as are 3MF textures, composite materials and
-  extensions other than materials and production.
+  3MF composite materials and extensions other than materials and
+  production are ignored, as are 3DS keyframer transforms (an object
+  instanced more than once is shown once).
+- Only base colour textures are used, without mipmaps, so a texture seen
+  from far away can shimmer. There is no transparency: glTF `BLEND`
+  materials are drawn opaque, and cutouts use a fixed alpha of one half.
+  Textures always repeat (no clamping or decals).
 - Only B-rep and faceted geometry is shown. Wireframe, PMI and tessellated
   (AP242 `TESSELLATED_*`) data are ignored.

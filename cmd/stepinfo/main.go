@@ -1,4 +1,4 @@
-// Command stepinfo loads a STEP (or glTF, OBJ, STL or 3MF) file, prints
+// Command stepinfo loads a STEP (or glTF, OBJ, STL, 3MF or 3DS) file, prints
 // statistics and the product tree, and can render a preview image. It is a
 // debugging aid for the loaders.
 package main
@@ -92,7 +92,7 @@ func load(path string) (*step.Model, error) {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".gltf", ".glb":
 		return gltfload.LoadFile(path)
-	case ".obj", ".stl", ".3mf":
+	case ".obj", ".stl", ".3mf", ".3ds":
 		return meshload.LoadFile(path)
 	}
 	return step.LoadFile(path, step.DefaultOptions())

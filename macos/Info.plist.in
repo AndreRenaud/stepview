@@ -45,6 +45,7 @@
 				<string>public.geometry-definition-format</string>
 				<string>public.standard-tesselated-geometry-format</string>
 				<string>io.3mf.3mf</string>
+				<string>com.autodesk.3ds</string>
 			</array>
 		</dict>
 	</array>
@@ -72,7 +73,7 @@
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
-	<!-- macOS declares the glTF, OBJ and STL types itself, but not STEP or 3MF. -->
+	<!-- macOS declares the glTF, OBJ and STL types itself, but not STEP, 3MF or 3DS. -->
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>
@@ -117,6 +118,28 @@
 				<key>public.mime-type</key>
 				<array>
 					<string>model/3mf</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.autodesk.3ds</string>
+			<key>UTTypeDescription</key>
+			<string>3D Studio Model</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.3d-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>3ds</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/x-3ds</string>
 				</array>
 			</dict>
 		</dict>

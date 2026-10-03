@@ -2,6 +2,7 @@ package main
 
 import (
 	"image"
+	"image/draw"
 	"math"
 	"runtime"
 	"slices"
@@ -41,12 +42,38 @@ var Stage int
 // material code, 2 the encoded view-space normal.
 var Output int
 
+// Textured is 1 when the triangles are textured by image 3, with srcPos
+// holding the texture coordinates divided by depth. Cutout is 1 when the
+// texture's transparent parts are holes, discarded in every pass; each
+// pass must then decide alike, which holds as the depth images are
+// unmanaged (their origin is zero, so srcPos is the same in every pass).
+// DepthA and DepthB decode the inverse depth: 1/z = custom.x*DepthA +
+// DepthB.
+var Textured int
+var Cutout int
+var DepthA float
+var DepthB float
+
 // Right, Up and Back are the camera's axes in model coordinates.
 var Right vec3
 var Up vec3
 var Back vec3
 
 func Fragment(dstPos vec4, srcPos vec2, color vec4, custom vec4) vec4 {
+	tex := vec4(1)
+	if Textured == 1 {
+		// Texture coordinates divided by depth interpolate linearly on
+		// screen, like the inverse depth itself.
+		tex = sampleTexture((srcPos - imageSrc0Origin()) / (custom.x*DepthA + DepthB))
+		if Cutout == 1 && tex.a < 0.5 {
+			discard()
+		}
+		if tex.a > 0 {
+			tex.rgb /= tex.a
+		}
+	}
+	color.rgb *= tex.rgb
+
 	q := floor(clamp(custom.x, 0, 1) * 16777215)
 	hi := floor(q / 65536)
 	q -= hi * 65536
@@ -89,6 +116,24 @@ func Fragment(dstPos vec4, srcPos vec2, color vec4, custom vec4) vec4 {
 		max(dot(n, normalize(vec3(-0.7, 0.5, 0.3))), 0)*0.35 +
 		max(dot(n, normalize(vec3(0.1, 0.3, -1))), 0)*0.15
 	return vec4(min(color.rgb*l, 1), 1)
+}
+
+// sampleTexture filters image 3 bilinearly at uv, in units of the image
+// size, repeating it outside [0, 1].
+func sampleTexture(uv vec2) vec4 {
+	size := imageSrc3Size()
+	p := uv*size - 0.5
+	i := floor(p)
+	f := p - i
+	return mix(
+		mix(texel(i, size), texel(i+vec2(1, 0), size), f.x),
+		mix(texel(i+vec2(0, 1), size), texel(i+vec2(1, 1), size), f.x),
+		f.y)
+}
+
+// texel returns pixel i of image 3, wrapping around its edges.
+func texel(i, size vec2) vec4 {
+	return imageSrc3UnsafeAtFromSrc0Pos(imageSrc0Origin() + mod(i, size) + 0.5)
 }
 
 // encodeNormal packs a unit vector into 24 bits: its octahedral
@@ -170,9 +215,29 @@ type renderer struct {
 	idxOff  []int // per instance: its offset in kept
 	doc     *document
 	work    []instanceWork
+	order   []int // visible instances (indices into work), grouped by texture
+
+	// The document's textures on the GPU, each instance's index into them
+	// (or -1), and the runs of the output that share a texture.
+	textures []gpuTexture
+	instTex  []int
+	ranges   []drawRange
 
 	// The inverse depth encoding of the last frame: 1/z = enc*depthA + depthB.
 	depthA, depthB float32
+}
+
+// gpuTexture is a mesh texture uploaded for drawing.
+type gpuTexture struct {
+	img    *ebiten.Image
+	cutout bool
+}
+
+// drawRange is a run of the projected vertices and triangles drawn with
+// one texture (or none, -1). Its indices count from vStart.
+type drawRange struct {
+	vStart, vEnd, iStart, iEnd int
+	tex                        int
 }
 
 // instanceWork holds per-frame results for one visible instance.
@@ -182,6 +247,7 @@ type instanceWork struct {
 	extraV     []ebiten.Vertex // vertices made by clipping at the near plane
 	extraI     []uint32        // triangles using them, numbered as in kept but with extraFlag for extraV
 	vOff, iOff int             // offsets in the output
+	vBase      int             // the start of the instance's draw range
 }
 
 // extraFlag marks an index into instanceWork.extraV.
@@ -235,11 +301,11 @@ func (r *renderer) render(d *document, c *camera, opt renderOptions) {
 	r.color.Clear()
 	verts, idx := r.project(d, &gc)
 	if len(idx) > 0 {
-		r.drawDepth(verts, idx)
+		r.drawDepth(verts)
 	}
 	if !opt.hq {
 		if len(idx) > 0 {
-			r.drawSurface(verts, idx, &gc, r.color, 0)
+			r.drawSurface(verts, &gc, r.color, 0)
 		}
 		return
 	}
@@ -249,24 +315,24 @@ func (r *renderer) render(d *document, c *camera, opt renderOptions) {
 	r.depth[0].Clear()
 	r.depth[1].Clear()
 	if len(idx) > 0 {
-		r.drawSurface(verts, idx, &gc, r.depth[0], 1)
-		r.drawSurface(verts, idx, &gc, r.depth[1], 2)
+		r.drawSurface(verts, &gc, r.depth[0], 1)
+		r.drawSurface(verts, &gc, r.depth[1], 2)
 	}
 	r.hq.render(r, c, &gc, ss, opt)
 }
 
 // drawDepth runs the three depth passes.
-func (r *renderer) drawDepth(verts []ebiten.Vertex, idx []uint32) {
+func (r *renderer) drawDepth(verts []ebiten.Vertex) {
 	op := &ebiten.DrawTrianglesShaderOptions{Blend: maxBlend}
 	for stage, dst := range r.depth {
 		op.Uniforms = map[string]any{"Stage": stage}
-		dst.DrawTrianglesShader32(verts, idx, r.shader, op)
+		r.drawRanges(dst, verts, op)
 		op.Images[stage] = dst
 	}
 }
 
 // drawSurface draws an output of the visible fragments into dst.
-func (r *renderer) drawSurface(verts []ebiten.Vertex, idx []uint32, c *camera, dst *ebiten.Image, output int) {
+func (r *renderer) drawSurface(verts []ebiten.Vertex, c *camera, dst *ebiten.Image, output int) {
 	op := &ebiten.DrawTrianglesShaderOptions{Blend: ebiten.BlendCopy}
 	if output == 0 {
 		op.Blend = ebiten.BlendSourceOver
@@ -279,7 +345,29 @@ func (r *renderer) drawSurface(verts []ebiten.Vertex, idx []uint32, c *camera, d
 		"Up":     vec3Uniform(c.up),
 		"Back":   vec3Uniform(c.back),
 	}
-	dst.DrawTrianglesShader32(verts, idx, r.shader, op)
+	r.drawRanges(dst, verts, op)
+}
+
+// drawRanges draws the projected triangles into dst one texture at a time,
+// adding the texture uniforms to op's.
+func (r *renderer) drawRanges(dst *ebiten.Image, verts []ebiten.Vertex, op *ebiten.DrawTrianglesShaderOptions) {
+	op.Uniforms["DepthA"] = r.depthA
+	op.Uniforms["DepthB"] = r.depthB
+	for _, rg := range r.ranges {
+		textured, cutout := 0, 0
+		op.Images[3] = nil
+		if rg.tex >= 0 {
+			t := r.textures[rg.tex]
+			op.Images[3] = t.img
+			textured = 1
+			if t.cutout {
+				cutout = 1
+			}
+		}
+		op.Uniforms["Textured"] = textured
+		op.Uniforms["Cutout"] = cutout
+		dst.DrawTrianglesShader32(verts[rg.vStart:rg.vEnd], r.indices[rg.iStart:rg.iEnd], r.shader, op)
+	}
 }
 
 func vec3Uniform(v step.Vec3) []float32 {
@@ -303,6 +391,55 @@ func (r *renderer) prepare(d *document) {
 	r.view = make([]float32, len(d.verts)*3)
 	r.remap = make([]int32, len(d.verts))
 	r.kept = make([]uint32, n)
+
+	for _, t := range r.textures {
+		t.img.Deallocate()
+	}
+	r.textures = r.textures[:0]
+	r.instTex = make([]int, len(d.insts))
+	slots := map[*step.Texture]int{}
+	for i, in := range d.insts {
+		r.instTex[i] = -1
+		if !textured(in.mesh) {
+			continue
+		}
+		t := in.mesh.Texture
+		slot, ok := slots[t]
+		if !ok {
+			slot = len(r.textures)
+			slots[t] = slot
+			r.textures = append(r.textures, gpuTexture{img: uploadTexture(texturePixels(t.Image, t.Cutout)), cutout: t.Cutout})
+		}
+		r.instTex[i] = slot
+	}
+}
+
+// texturePixels converts a texture image to premultiplied RGBA for the
+// GPU. The alpha of a texture without holes means nothing (glTF's opaque
+// mode, or atlas padding), so it is made opaque, keeping the colour stored
+// under transparent pixels instead of premultiplying it away.
+func texturePixels(src image.Image, cutout bool) *image.RGBA {
+	b := src.Bounds()
+	r := image.Rect(0, 0, b.Dx(), b.Dy())
+	rgba := image.NewRGBA(r)
+	if cutout {
+		draw.Draw(rgba, r, src, b.Min, draw.Src)
+		return rgba
+	}
+	n := image.NewNRGBA(r)
+	draw.Draw(n, r, src, b.Min, draw.Src)
+	for i := 3; i < len(n.Pix); i += 4 {
+		n.Pix[i] = 255
+	}
+	draw.Draw(rgba, r, n, image.Point{}, draw.Src)
+	return rgba
+}
+
+// uploadTexture copies premultiplied pixels to the GPU.
+func uploadTexture(px *image.RGBA) *ebiten.Image {
+	img := ebiten.NewImageWithOptions(px.Bounds(), &ebiten.NewImageOptions{Unmanaged: true})
+	img.WritePixels(px.Pix)
+	return img
 }
 
 // project computes the screen position and depth of the visible
@@ -319,9 +456,11 @@ func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
 	pos, verts, view := d.pos, d.verts, r.view
 	r.work = slices.Grow(r.work[:0], len(d.visible))[:len(d.visible)]
 
-	// Screen and view positions (x, y and depth).
+	// Screen and view positions (x, y and depth), and texture coordinates
+	// divided by depth.
 	parallelEach(len(d.visible), func(k int) {
 		in := &d.insts[d.visible[k]]
+		textured := r.instTex[d.visible[k]] >= 0
 		mn, mx := float32(math.Inf(1)), float32(math.Inf(-1))
 		for i := in.vert0; i < in.vert0+len(in.mesh.Positions)/3; i++ {
 			x, y, z := pos[i*3], pos[i*3+1], pos[i*3+2]
@@ -333,6 +472,9 @@ func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
 			if vz > 0 {
 				v.DstX = cx + f*vx/vz
 				v.DstY = cy - f*vy/vz
+				if textured {
+					v.SrcX, v.SrcY = d.uv[i*2]/vz, d.uv[i*2+1]/vz
+				}
 			}
 			mn = min(mn, vz)
 			mx = max(mx, vz)
@@ -375,6 +517,10 @@ func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
 		base := in.vert0
 		iv := verts[base : base+len(mesh.Positions)/3]
 		ivw := view[base*3 : (base+len(iv))*3]
+		var iuv []float32
+		if r.instTex[ii] >= 0 {
+			iuv = d.uv[base*2 : (base+len(iv))*2]
+		}
 		for i := range iv {
 			if z := ivw[i*3+2]; z >= clipNear {
 				iv[i].Custom0 = encode(z)
@@ -396,7 +542,7 @@ func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
 			tri := [3]uint32{mesh.Indices[t], mesh.Indices[t+1], mesh.Indices[t+2]}
 			va, vb, vc := &iv[tri[0]], &iv[tri[1]], &iv[tri[2]]
 			if ivw[tri[0]*3+2] < clipNear || ivw[tri[1]*3+2] < clipNear || ivw[tri[2]*3+2] < clipNear {
-				wk.clip(tri, iv, ivw, clipNear, func(x, y float32) (float32, float32) {
+				wk.clip(tri, iv, ivw, iuv, clipNear, func(x, y float32) (float32, float32) {
 					return cx + f*x/clipNear, cy - f*y/clipNear
 				}, encode(clipNear), facing, use)
 				continue
@@ -412,13 +558,28 @@ func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
 		}
 	})
 
-	// Pack the survivors.
-	nv, ni := 0, 0
+	// Pack the survivors, grouped by texture so that each texture's
+	// triangles and vertices form one range.
+	r.order = r.order[:0]
 	for k := range r.work {
+		r.order = append(r.order, k)
+	}
+	slices.SortStableFunc(r.order, func(a, b int) int {
+		return r.instTex[d.visible[a]] - r.instTex[d.visible[b]]
+	})
+	r.ranges = r.ranges[:0]
+	nv, ni := 0, 0
+	for _, k := range r.order {
 		wk := &r.work[k]
-		wk.vOff, wk.iOff = nv, ni
+		tex := r.instTex[d.visible[k]]
+		if n := len(r.ranges); n == 0 || r.ranges[n-1].tex != tex {
+			r.ranges = append(r.ranges, drawRange{vStart: nv, iStart: ni, tex: tex})
+		}
+		rg := &r.ranges[len(r.ranges)-1]
+		wk.vOff, wk.iOff, wk.vBase = nv, ni, rg.vStart
 		nv += wk.used + len(wk.extraV)
 		ni += wk.kept + len(wk.extraI)
+		rg.vEnd, rg.iEnd = nv, ni
 	}
 	parallelEach(len(d.visible), func(k int) {
 		ii := d.visible[k]
@@ -433,15 +594,16 @@ func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
 		}
 		copy(r.verts[wk.vOff+wk.used:], wk.extraV)
 		out := r.indices[wk.iOff:]
+		off := wk.vOff - wk.vBase
 		for t, x := range r.kept[r.idxOff[ii] : r.idxOff[ii]+wk.kept] {
-			out[t] = uint32(wk.vOff + int(remap[x]))
+			out[t] = uint32(off + int(remap[x]))
 		}
 		out = out[wk.kept:]
 		for t, x := range wk.extraI {
 			if x&extraFlag != 0 {
-				out[t] = uint32(wk.vOff + wk.used + int(x&^extraFlag))
+				out[t] = uint32(off + wk.used + int(x&^extraFlag))
 			} else {
-				out[t] = uint32(wk.vOff + int(remap[x]))
+				out[t] = uint32(off + int(remap[x]))
 			}
 		}
 	})
@@ -450,9 +612,10 @@ func (r *renderer) project(d *document, c *camera) ([]ebiten.Vertex, []uint32) {
 
 // clip cuts a triangle crossing the near plane at depth zn and keeps the
 // part in front: a triangle or a quadrilateral. iv and ivw are the
-// instance's vertices and their view positions. New vertices interpolate
-// the surface attributes along the cut edges.
-func (wk *instanceWork) clip(tri [3]uint32, iv []ebiten.Vertex, ivw []float32, zn float32,
+// instance's vertices and their view positions, and iuv their texture
+// coordinates if it is textured. New vertices interpolate the surface
+// attributes along the cut edges.
+func (wk *instanceWork) clip(tri [3]uint32, iv []ebiten.Vertex, ivw, iuv []float32, zn float32,
 	project func(x, y float32) (float32, float32), depth float32,
 	facing func(a, b, c *ebiten.Vertex) bool, use func(uint32)) {
 	type corner struct {
@@ -478,6 +641,9 @@ func (wk *instanceWork) clip(tri [3]uint32, iv []ebiten.Vertex, ivw []float32, z
 				Custom1: lerp(i.Custom1, j.Custom1), Custom2: lerp(i.Custom2, j.Custom2), Custom3: lerp(i.Custom3, j.Custom3),
 			}
 			v.DstX, v.DstY = project(lerp(ivw[a*3], ivw[b*3]), lerp(ivw[a*3+1], ivw[b*3+1]))
+			if iuv != nil {
+				v.SrcX, v.SrcY = lerp(iuv[a*2], iuv[b*2])/zn, lerp(iuv[a*2+1], iuv[b*2+1])/zn
+			}
 			poly[n] = corner{v, extraFlag}
 			n++
 		}

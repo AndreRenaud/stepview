@@ -13,18 +13,16 @@ import (
 	"github.com/AndreRenaud/stepview/internal/step"
 )
 
-// LoadOBJ reads a Wavefront OBJ file and the diffuse colours from its MTL
-// material libraries. OBJ has no units and is conventionally Y up, so the
-// model is turned to Z up and its coordinates are used as millimetres.
+// LoadOBJ reads a Wavefront OBJ file and the diffuse colours and textures
+// from its MTL material libraries. OBJ has no units and is conventionally
+// Y up, so the model is turned to Z up and its coordinates are used as
+// millimetres.
 func LoadOBJ(path string) (*step.Model, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	dir := filepath.Dir(path)
-	return loadOBJ(data, baseName(path), func(name string) ([]byte, error) {
-		return os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
-	})
+	return loadOBJ(data, baseName(path), dirOpener(filepath.Dir(path)))
 }
 
 type objGroup struct {
@@ -32,16 +30,26 @@ type objGroup struct {
 	b    builder
 }
 
-// loadOBJ parses an OBJ file; open reads a material library named in it.
+// objMaterial is an MTL material's diffuse colour and texture.
+type objMaterial struct {
+	colour        [3]float32
+	tex, mask     string     // map_Kd and map_d file names
+	scale, offset [2]float32 // map_Kd -s and -o
+}
+
+// loadOBJ parses an OBJ file; open reads a material library or texture
+// named in it.
 func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step.Model, error) {
 	var (
 		pos      [][3]float32
 		vcol     [][3]float32 // per vertex, valid where hasCol is set
 		hasCol   []bool
 		nrm      [][3]float32
-		mats     = map[string][3]float32{}
+		uvs      [][2]float32
+		mats     = map[string]*objMaterial{}
 		missing  = map[string]bool{}
-		colour   = defaultColour
+		mat      = &objMaterial{colour: defaultColour, scale: [2]float32{1, 1}}
+		tex      *step.Texture
 		groups   []*objGroup
 		byName   = map[string]*objGroup{}
 		object   string
@@ -50,6 +58,9 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 		warnings []string
 		badFaces int
 	)
+	tx := newTextures(open, func(format string, args ...any) {
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+	})
 	selectGroup := func() {
 		label := object
 		if group != "" && group != object {
@@ -92,6 +103,8 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 	}
 
 	var fp, fc, fn [][3]float32
+	var fuv [][2]float32
+	var fv []int
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	var pending string
@@ -120,6 +133,10 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 			// "v x y z r g b" is a common extension for vertex colours.
 			hasCol = append(hasCol, n == 6)
 			vcol = append(vcol, [3]float32{v[3], v[4], v[5]})
+		case "vt":
+			var v [2]float32
+			floats(f[1:], v[:])
+			uvs = append(uvs, v)
 		case "vn":
 			var v [3]float32
 			if floats(f[1:], v[:]) == 3 {
@@ -128,8 +145,8 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 				nrm = append(nrm, [3]float32{})
 			}
 		case "f":
-			fp, fc, fn = fp[:0], fc[:0], fn[:0]
-			ok, allNrm := len(f) >= 4, true
+			fp, fc, fn, fuv, fv = fp[:0], fc[:0], fn[:0], fuv[:0], fv[:0]
+			ok, allNrm, allUV := len(f) >= 4, true, tex != nil
 			for _, c := range f[1:] {
 				parts := strings.Split(c, "/")
 				vi, good := index(parts[0], len(pos))
@@ -138,10 +155,17 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 					break
 				}
 				fp = append(fp, pos[vi])
-				if hasCol[vi] {
-					fc = append(fc, vcol[vi])
+				fv = append(fv, vi)
+				ti, good := -1, false
+				if len(parts) >= 2 && allUV {
+					ti, good = index(parts[1], len(uvs))
+				}
+				if good {
+					// Bottom left origin -> top left.
+					uv := uvs[ti]
+					fuv = append(fuv, [2]float32{uv[0]*mat.scale[0] + mat.offset[0], 1 - uv[1]*mat.scale[1] - mat.offset[1]})
 				} else {
-					fc = append(fc, colour)
+					allUV = false
 				}
 				ni, good := -1, false
 				if len(parts) == 3 {
@@ -160,11 +184,25 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 			if cur == nil {
 				selectGroup()
 			}
-			if allNrm {
-				cur.b.addPolygon(fp, fc, fn)
+			// A texture replaces the material colour, which exporters often
+			// leave black or grey.
+			base, ftex, uv, n := mat.colour, tex, fuv, fn
+			if allUV {
+				base = [3]float32{1, 1, 1}
 			} else {
-				cur.b.addPolygon(fp, fc, nil)
+				ftex, uv = nil, nil
 			}
+			for _, vi := range fv {
+				if hasCol[vi] {
+					fc = append(fc, vcol[vi])
+				} else {
+					fc = append(fc, base)
+				}
+			}
+			if !allNrm {
+				n = nil
+			}
+			cur.b.addPolygon(fp, fc, n, ftex, uv)
 		case "o":
 			object, group = strings.Join(f[1:], " "), ""
 			selectGroup()
@@ -172,16 +210,16 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 			group = strings.Join(f[1:], " ")
 			selectGroup()
 		case "usemtl":
-			mat := strings.Join(f[1:], " ")
-			c, ok := mats[mat]
+			mn := strings.Join(f[1:], " ")
+			m, ok := mats[mn]
 			if !ok {
-				c = defaultColour
-				if !missing[mat] {
-					missing[mat] = true
-					warnings = append(warnings, fmt.Sprintf("material %q not found", mat))
+				m = &objMaterial{colour: defaultColour, scale: [2]float32{1, 1}}
+				if !missing[mn] {
+					missing[mn] = true
+					warnings = append(warnings, fmt.Sprintf("material %q not found", mn))
 				}
 			}
-			colour = c
+			mat, tex = m, tx.load(m.tex, m.mask)
 		case "mtllib":
 			// Names are usually space separated, but a single name may
 			// itself contain spaces.
@@ -211,34 +249,40 @@ func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step
 	// Y up -> Z up.
 	root := &step.Node{Name: name, Local: step.Affine{R: [3][3]float64{{1, 0, 0}, {0, 0, -1}, {0, 1, 0}}}}
 	var nodes []*step.Node
+	var meshes [][]*step.Mesh
 	for i, g := range groups {
 		if g.b.dropped > 0 {
 			warnings = append(warnings, fmt.Sprintf("%s: %d triangles with invalid coordinates", g.name, g.b.dropped))
 		}
-		m := g.b.mesh()
-		if m == nil {
+		ms := g.b.meshes()
+		if len(ms) == 0 {
 			continue
 		}
 		gn := g.name
 		if gn == "" {
 			gn = fmt.Sprintf("Group %d", i+1)
 		}
-		nodes = append(nodes, &step.Node{Name: gn, Local: step.Identity(), Mesh: m})
+		nodes = append(nodes, &step.Node{Name: gn, Local: step.Identity()})
+		meshes = append(meshes, ms)
 	}
 	switch len(nodes) {
 	case 0:
 		return nil, errors.New("obj: no faces found")
 	case 1:
-		root.Mesh = nodes[0].Mesh
+		setMeshes(root, meshes[0])
 	default:
+		for i, n := range nodes {
+			setMeshes(n, meshes[i])
+		}
 		root.Children = nodes
 	}
 	return finish(name, []*step.Node{root}, warnings), nil
 }
 
-// readMTL adds the diffuse colours (Kd) of a material library to mats.
-func readMTL(data []byte, mats map[string][3]float32) {
-	var cur string
+// readMTL adds the diffuse colours (Kd) and textures (map_Kd, with map_d
+// as its alpha) of a material library to mats.
+func readMTL(data []byte, mats map[string]*objMaterial) {
+	cur := &objMaterial{}
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	for sc.Scan() {
 		line := sc.Text()
@@ -251,8 +295,12 @@ func readMTL(data []byte, mats map[string][3]float32) {
 		}
 		switch f[0] {
 		case "newmtl":
-			cur = strings.Join(f[1:], " ")
-			mats[cur] = defaultColour
+			cur = &objMaterial{colour: defaultColour, scale: [2]float32{1, 1}}
+			mats[strings.Join(f[1:], " ")] = cur
+		case "map_Kd":
+			cur.tex, cur.scale, cur.offset = parseMap(f[1:])
+		case "map_d":
+			cur.mask, _, _ = parseMap(f[1:])
 		case "Kd":
 			var c [3]float32
 			n := 0
@@ -265,10 +313,58 @@ func readMTL(data []byte, mats map[string][3]float32) {
 			}
 			switch n {
 			case 1: // "Kd r" means grey
-				mats[cur] = [3]float32{c[0], c[0], c[0]}
+				cur.colour = [3]float32{c[0], c[0], c[0]}
 			case 3:
-				mats[cur] = c
+				cur.colour = c
 			}
 		}
 	}
+}
+
+// mapArgs is the number of arguments each MTL texture map option takes;
+// -o, -s and -t take one to three numbers.
+var mapArgs = map[string]int{
+	"-blendu": 1, "-blendv": 1, "-bm": 1, "-boost": 1, "-cc": 1, "-clamp": 1,
+	"-imfchan": 1, "-texres": 1, "-type": 1, "-mm": 2, "-o": 3, "-s": 3, "-t": 3,
+}
+
+// parseMap reads the arguments of a texture map statement: options, then
+// a file name that may contain spaces. It returns the name and the
+// texture coordinate scale (-s) and offset (-o).
+func parseMap(f []string) (name string, scale, offset [2]float32) {
+	scale = [2]float32{1, 1}
+	for len(f) > 1 {
+		n, ok := mapArgs[f[0]]
+		if !ok {
+			break
+		}
+		opt := f[0]
+		f = f[1:]
+		if opt != "-o" && opt != "-s" && opt != "-t" {
+			f = f[min(n, len(f)-1):]
+			continue
+		}
+		var v []float32
+		for len(v) < n && len(f) > 1 {
+			x, err := strconv.ParseFloat(f[0], 32)
+			if err != nil {
+				break
+			}
+			v = append(v, float32(x))
+			f = f[1:]
+		}
+		switch {
+		case opt == "-s" && len(v) > 0:
+			scale = [2]float32{v[0], 1}
+			if len(v) > 1 {
+				scale[1] = v[1]
+			}
+		case opt == "-o" && len(v) > 0:
+			offset = [2]float32{v[0], 0}
+			if len(v) > 1 {
+				offset[1] = v[1]
+			}
+		}
+	}
+	return strings.Join(f, " "), scale, offset
 }

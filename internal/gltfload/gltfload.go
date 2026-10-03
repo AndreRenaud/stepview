@@ -3,15 +3,20 @@
 package gltfload
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/qmuntal/gltf"
 	"github.com/qmuntal/gltf/modeler"
 
+	"github.com/AndreRenaud/stepview/internal/meshload"
 	"github.com/AndreRenaud/stepview/internal/step"
 )
 
@@ -22,12 +27,19 @@ func LoadFile(path string) (*step.Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	return load(doc, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+	return load(doc, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), os.DirFS(filepath.Dir(path)))
 }
 
-// load converts a decoded document; name labels the root node.
-func load(doc *gltf.Document, name string) (*step.Model, error) {
-	l := &loader{doc: doc, meshes: map[int][]*step.Mesh{}}
+// load converts a decoded document; name labels the root node and fsys
+// holds the external images it refers to.
+func load(doc *gltf.Document, name string, fsys fs.FS) (*step.Model, error) {
+	l := &loader{
+		doc:      doc,
+		fsys:     fsys,
+		meshes:   map[int][]*step.Mesh{},
+		images:   map[int]*step.Texture{},
+		variants: map[variant]*step.Texture{},
+	}
 	// Y-up metres -> Z-up millimetres.
 	conv := step.Affine{R: [3][3]float64{{1000, 0, 0}, {0, 0, -1000}, {0, 1000, 0}}}
 	root := &step.Node{Name: name, Local: conv}
@@ -78,8 +90,18 @@ func load(doc *gltf.Document, name string) (*step.Model, error) {
 
 type loader struct {
 	doc      *gltf.Document
+	fsys     fs.FS
 	meshes   map[int][]*step.Mesh
+	images   map[int]*step.Texture // decoded images, nil where unusable
+	variants map[variant]*step.Texture
 	warnings []string
+}
+
+// variant is an image with its Cutout flag set by a material rather than
+// by the image itself.
+type variant struct {
+	image  int
+	cutout bool
 }
 
 func nodeTransform(n *gltf.Node) step.Affine {
@@ -202,10 +224,23 @@ func (l *loader) primitive(p *gltf.Primitive) (*step.Mesh, error) {
 	}
 	base := [4]float64{0.8, 0.8, 0.8, 1}
 	var pbr *gltf.PBRMetallicRoughness
-	if p.Material != nil && *p.Material >= 0 && *p.Material < len(l.doc.Materials) {
-		pbr = l.doc.Materials[*p.Material].PBRMetallicRoughness
+	var tex *step.Texture
+	var uvs [][2]float32
+	if p.Material != nil && *p.Material >= 0 && *p.Material < len(l.doc.Materials) && l.doc.Materials[*p.Material] != nil {
+		mat := l.doc.Materials[*p.Material]
+		pbr = mat.PBRMetallicRoughness
 		if pbr != nil && pbr.BaseColorFactor != nil {
 			base = *pbr.BaseColorFactor
+		}
+		var set int
+		if tex, set = l.texture(mat); tex != nil {
+			if a, err := l.accessor(attribute(p, fmt.Sprintf("TEXCOORD_%d", set))); err == nil {
+				uvs, _ = modeler.ReadTextureCoord(l.doc, a, nil)
+			}
+			if len(uvs) != len(pos) {
+				l.warnings = append(l.warnings, fmt.Sprintf("texture %s: no texture coordinates", tex.Name))
+				tex = nil
+			}
 		}
 	}
 	var cols [][4]uint8
@@ -246,6 +281,18 @@ func (l *loader) primitive(p *gltf.Primitive) (*step.Mesh, error) {
 		}
 		m.Colors = append(m.Colors, c[0], c[1], c[2])
 	}
+	if tex != nil {
+		m.Texture = tex
+		m.UVs = make([]float32, 0, len(uvs)*2)
+		for _, uv := range uvs {
+			for _, v := range uv {
+				if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+					v = 0
+				}
+				m.UVs = append(m.UVs, v)
+			}
+		}
+	}
 	for k := 0; k+2 < len(idx); k += 3 {
 		if int(idx[k]) >= len(pos) || int(idx[k+1]) >= len(pos) || int(idx[k+2]) >= len(pos) {
 			continue
@@ -254,6 +301,110 @@ func (l *loader) primitive(p *gltf.Primitive) (*step.Mesh, error) {
 	}
 	m.FaceStarts = []uint32{0}
 	return m, nil
+}
+
+// attribute returns the accessor index of a primitive attribute, or -1.
+func attribute(p *gltf.Primitive, name string) int {
+	if i, ok := p.Attributes[name]; ok {
+		return i
+	}
+	return -1
+}
+
+// texture returns a material's base colour texture and the index of the
+// texture coordinate set it uses, or nil. Cutout follows the material's
+// alpha mode: blending is not supported, so only masks cut holes.
+func (l *loader) texture(mat *gltf.Material) (*step.Texture, int) {
+	pbr := mat.PBRMetallicRoughness
+	if pbr == nil || pbr.BaseColorTexture == nil {
+		return nil, 0
+	}
+	ti := pbr.BaseColorTexture.Index
+	if ti < 0 || ti >= len(l.doc.Textures) || l.doc.Textures[ti] == nil || l.doc.Textures[ti].Source == nil {
+		return nil, 0
+	}
+	src := *l.doc.Textures[ti].Source
+	tex := l.image(src)
+	if tex == nil {
+		return nil, 0
+	}
+	if cutout := mat.AlphaMode == gltf.AlphaMask; tex.Cutout != cutout {
+		v := variant{src, cutout}
+		if l.variants[v] == nil {
+			c := *tex
+			c.Cutout = cutout
+			l.variants[v] = &c
+		}
+		tex = l.variants[v]
+	}
+	return tex, pbr.BaseColorTexture.TexCoord
+}
+
+// image decodes the i'th image, or returns nil (with a warning) if it is
+// unusable.
+func (l *loader) image(i int) *step.Texture {
+	if tex, ok := l.images[i]; ok {
+		return tex
+	}
+	l.images[i] = nil
+	if i < 0 || i >= len(l.doc.Images) || l.doc.Images[i] == nil {
+		l.warnings = append(l.warnings, fmt.Sprintf("image %d not found", i))
+		return nil
+	}
+	im := l.doc.Images[i]
+	name := im.Name
+	if name == "" && !strings.HasPrefix(im.URI, "data:") {
+		name = im.URI
+	}
+	if name == "" {
+		name = fmt.Sprintf("image %d", i)
+	}
+	data, err := l.imageData(im)
+	if err != nil {
+		l.warnings = append(l.warnings, fmt.Sprintf("texture %s: %v", name, err))
+		return nil
+	}
+	tex, err := meshload.DecodeTexture(data, name)
+	if err != nil {
+		l.warnings = append(l.warnings, err.Error())
+		return nil
+	}
+	l.images[i] = tex
+	return tex
+}
+
+// imageData returns an image's encoded bytes, from a buffer view, a data
+// URI or an external file.
+func (l *loader) imageData(im *gltf.Image) ([]byte, error) {
+	switch {
+	case im.BufferView != nil:
+		i := *im.BufferView
+		if i < 0 || i >= len(l.doc.BufferViews) || l.doc.BufferViews[i] == nil {
+			return nil, fmt.Errorf("buffer view %d out of range", i)
+		}
+		bv := l.doc.BufferViews[i]
+		if bv.Buffer < 0 || bv.Buffer >= len(l.doc.Buffers) || l.doc.Buffers[bv.Buffer] == nil {
+			return nil, fmt.Errorf("buffer %d out of range", bv.Buffer)
+		}
+		data := l.doc.Buffers[bv.Buffer].Data
+		if bv.ByteOffset < 0 || bv.ByteLength < 0 || bv.ByteOffset > len(data) || bv.ByteLength > len(data)-bv.ByteOffset {
+			return nil, errors.New("buffer view out of range")
+		}
+		return data[bv.ByteOffset : bv.ByteOffset+bv.ByteLength], nil
+	case strings.HasPrefix(im.URI, "data:"):
+		_, enc, ok := strings.Cut(im.URI, ";base64,")
+		if !ok {
+			return nil, errors.New("unsupported data URI")
+		}
+		return base64.StdEncoding.DecodeString(enc)
+	case l.fsys == nil:
+		return nil, errors.New("external images are not supported here")
+	}
+	name, err := url.PathUnescape(im.URI)
+	if err != nil {
+		name = im.URI
+	}
+	return fs.ReadFile(l.fsys, name)
 }
 
 // accessor returns the i'th accessor, or an error if there is none.

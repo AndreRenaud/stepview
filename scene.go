@@ -41,6 +41,7 @@ type document struct {
 	// The vertices of every instance, in world space, ready for the
 	// renderer.
 	pos         []float32       // 3 per vertex
+	uv          []float32       // 2 per vertex, or nil when nothing is textured
 	verts       []ebiten.Vertex // surface attributes; the renderer fills in the rest
 	visible     []int           // instances that are not hidden
 	visibleTris int
@@ -100,6 +101,12 @@ func (d *document) buildGeometry() {
 	}
 	d.pos = make([]float32, nv*3)
 	d.verts = make([]ebiten.Vertex, nv)
+	for _, in := range d.insts {
+		if textured(in.mesh) {
+			d.uv = make([]float32, nv*2)
+			break
+		}
+	}
 	parallelEach(len(d.insts), func(i int) {
 		in := &d.insts[i]
 		m := in.mesh
@@ -119,9 +126,17 @@ func (d *document) buildGeometry() {
 			vt.ColorA = float32(lastMat) / 255
 			vt.Custom1, vt.Custom2, vt.Custom3 = float32(n.X), float32(n.Y), float32(n.Z)
 		}
+		if textured(m) {
+			copy(d.uv[in.vert0*2:], m.UVs)
+		}
 		d.paint(i)
 	})
 	d.updateVisible()
+}
+
+// textured reports whether a mesh has a usable texture.
+func textured(m *step.Mesh) bool {
+	return m.Texture != nil && m.Texture.Image != nil && len(m.UVs) == len(m.Positions)/3*2
 }
 
 // paint sets the colours of an instance's vertices.

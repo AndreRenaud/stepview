@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"strconv"
 	"strings"
 
@@ -14,7 +15,7 @@ import (
 
 // Load3MF reads a 3MF file: the build items of its root model, with their
 // components (including production extension references into other model
-// parts) and colours from base materials and colour groups.
+// parts), colours from base materials and colour groups, and textures.
 func Load3MF(path string) (*step.Model, error) {
 	zr, err := zip.OpenReader(path)
 	if err != nil {
@@ -66,18 +67,27 @@ type tmfItem struct {
 	xf     step.Affine
 }
 
+// tmfTexGroup is a texture coordinate group (texture2dgroup).
+type tmfTexGroup struct {
+	texture int // texture2d id
+	uv      [][2]float32
+}
+
 type tmfModel struct {
-	unit    float64
-	objects map[int]*tmfObject
-	order   []*tmfObject
-	props   map[int][][3]float32 // property group -> colours
-	build   []tmfItem
+	unit      float64
+	objects   map[int]*tmfObject
+	order     []*tmfObject
+	props     map[int][][3]float32 // property group -> colours
+	textures  map[int]string       // texture2d id -> image part
+	texGroups map[int]*tmfTexGroup
+	build     []tmfItem
 }
 
 type tmfLoader struct {
 	files    map[string]*zip.File // lower-case part name without leading slash
 	models   map[string]*tmfModel
-	meshes   map[*tmfObject]*step.Mesh
+	meshes   map[*tmfObject][]*step.Mesh
+	textures *textures
 	nodes    int
 	tris     int
 	warnings []string
@@ -87,11 +97,12 @@ func load3MF(zr *zip.Reader, name string) (*step.Model, error) {
 	l := &tmfLoader{
 		files:  map[string]*zip.File{},
 		models: map[string]*tmfModel{},
-		meshes: map[*tmfObject]*step.Mesh{},
+		meshes: map[*tmfObject][]*step.Mesh{},
 	}
 	for _, f := range zr.File {
 		l.files[partKey(f.Name)] = f
 	}
+	l.textures = newTextures(l.readPart, l.warn)
 	rootPath := l.rootPart()
 	root, err := l.model(rootPath)
 	if err != nil {
@@ -184,6 +195,26 @@ func (l *tmfLoader) model(part string) (*tmfModel, error) {
 	return m, nil
 }
 
+// maxPartSize bounds the parts that are read whole, such as textures.
+const maxPartSize = 1 << 28
+
+// readPart reads a part of the package, such as a texture.
+func (l *tmfLoader) readPart(name string) ([]byte, error) {
+	f := l.files[partKey(name)]
+	if f == nil {
+		return nil, fs.ErrNotExist
+	}
+	if f.UncompressedSize64 > maxPartSize {
+		return nil, errors.New("part is too large")
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(io.LimitReader(rc, maxPartSize))
+}
+
 func (l *tmfLoader) warn(format string, args ...any) {
 	if len(l.warnings) < 1000 {
 		l.warnings = append(l.warnings, fmt.Sprintf(format, args...))
@@ -216,9 +247,11 @@ func (l *tmfLoader) node(part string, id int, xf step.Affine, depth int) *step.N
 	}
 	n := &step.Node{Name: name, Local: xf}
 	if len(o.tris) > 0 {
-		if n.Mesh = l.mesh(part, m, o); n.Mesh != nil {
-			l.tris += n.Mesh.TriangleCount()
+		ms := l.mesh(part, m, o)
+		for _, me := range ms {
+			l.tris += me.TriangleCount()
 		}
+		setMeshes(n, ms)
 	}
 	for _, c := range o.comps {
 		p := part
@@ -235,7 +268,8 @@ func (l *tmfLoader) node(part string, id int, xf step.Affine, depth int) *step.N
 	return n
 }
 
-func (l *tmfLoader) mesh(part string, m *tmfModel, o *tmfObject) *step.Mesh {
+// mesh builds an object's meshes, one per texture.
+func (l *tmfLoader) mesh(part string, m *tmfModel, o *tmfObject) []*step.Mesh {
 	if me, ok := l.meshes[o]; ok {
 		return me
 	}
@@ -274,6 +308,13 @@ func (l *tmfLoader) mesh(part string, m *tmfModel, o *tmfObject) *step.Mesh {
 			}
 			c[k] = colour(pid, idx[k])
 		}
+		if g := m.texGroups[pid]; g != nil {
+			if tex, uv, ok := l.texCoords(m, g, idx); ok {
+				w := [3]float32{1, 1, 1}
+				b.addTextured(p, [3][3]float32{w, w, w}, nil, tex, &uv)
+				continue
+			}
+		}
 		b.add(p, c, nil)
 	}
 	if bad > 0 {
@@ -282,18 +323,44 @@ func (l *tmfLoader) mesh(part string, m *tmfModel, o *tmfObject) *step.Mesh {
 	if b.dropped > 0 {
 		l.warn("%s: object %d: %d triangles with invalid coordinates", part, o.id, b.dropped)
 	}
-	me := b.mesh()
-	l.meshes[o] = me
-	return me
+	ms := b.meshes()
+	l.meshes[o] = ms
+	return ms
+}
+
+// texCoords returns the texture and corner coordinates for a triangle
+// whose properties are in texture coordinate group g.
+func (l *tmfLoader) texCoords(m *tmfModel, g *tmfTexGroup, idx [3]int) (*step.Texture, [3][2]float32, bool) {
+	var uv [3][2]float32
+	for k, i := range idx {
+		if i < 0 || i >= len(g.uv) {
+			return nil, uv, false
+		}
+		// Bottom left origin -> top left.
+		uv[k] = [2]float32{g.uv[i][0], 1 - g.uv[i][1]}
+	}
+	path, ok := m.textures[g.texture]
+	if !ok {
+		return nil, uv, false
+	}
+	tex := l.textures.load(path, "")
+	return tex, uv, tex != nil
 }
 
 // parseModel reads a 3MF model part. Namespace prefixes are ignored: the
 // element and attribute names used here are unique across the core,
 // material and production specifications.
 func parseModel(r io.Reader) (*tmfModel, error) {
-	m := &tmfModel{unit: 1, objects: map[int]*tmfObject{}, props: map[int][][3]float32{}}
+	m := &tmfModel{
+		unit:      1,
+		objects:   map[int]*tmfObject{},
+		props:     map[int][][3]float32{},
+		textures:  map[int]string{},
+		texGroups: map[int]*tmfTexGroup{},
+	}
 	d := xml.NewDecoder(r)
 	var obj *tmfObject
+	var texGroup *tmfTexGroup
 	group := -1
 	inBuild := false
 	for {
@@ -312,10 +379,21 @@ func parseModel(r io.Reader) (*tmfModel, error) {
 				if u, ok := units[a.str("unit")]; ok {
 					m.unit = u
 				}
-			case "basematerials", "colorgroup", "texture2dgroup", "compositematerials", "multiproperties":
+			case "basematerials", "colorgroup", "compositematerials", "multiproperties":
 				group = a.int("id", -1)
 				if _, ok := m.props[group]; !ok {
 					m.props[group] = nil
+				}
+			case "texture2d":
+				m.textures[a.int("id", -1)] = a.str("path")
+			case "texture2dgroup":
+				texGroup = &tmfTexGroup{texture: a.int("texid", -1)}
+				if id := a.int("id", -1); m.texGroups[id] == nil {
+					m.texGroups[id] = texGroup
+				}
+			case "tex2coord":
+				if texGroup != nil {
+					texGroup.uv = append(texGroup.uv, [2]float32{a.f32("u"), a.f32("v")})
 				}
 			case "base":
 				if group >= 0 {
@@ -364,8 +442,10 @@ func parseModel(r io.Reader) (*tmfModel, error) {
 			switch t.Name.Local {
 			case "object":
 				obj = nil
-			case "basematerials", "colorgroup", "texture2dgroup", "compositematerials", "multiproperties":
+			case "basematerials", "colorgroup", "compositematerials", "multiproperties":
 				group = -1
+			case "texture2dgroup":
+				texGroup = nil
 			case "build":
 				inBuild = false
 			}

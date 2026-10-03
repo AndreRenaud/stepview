@@ -3,6 +3,7 @@ package step
 import (
 	"errors"
 	"fmt"
+	"image"
 	"math"
 	"os"
 	"runtime"
@@ -36,7 +37,25 @@ type Mesh struct {
 	// is set (glTF materials); otherwise the viewer guesses from colours.
 	Metallic, Roughness float32
 	HasPBR              bool
+
+	// Texture, when set, is multiplied into the vertex colours, mapped by
+	// UVs: two per vertex, in texture widths and heights from the image's
+	// top left corner, repeating outside [0, 1].
+	Texture *Texture
+	UVs     []float32
 }
+
+// Texture is an image applied to a mesh's surface.
+type Texture struct {
+	Name  string      // for messages, typically the file name
+	Image image.Image // at most MaxTextureSize pixels on a side
+	// Cutout is set when the image's alpha marks holes in the surface:
+	// fragments where it is below one half are not drawn.
+	Cutout bool
+}
+
+// MaxTextureSize bounds texture images, which are scaled down to fit.
+const MaxTextureSize = 4096
 
 // TriangleCount returns the number of triangles.
 func (m *Mesh) TriangleCount() int { return len(m.Indices) / 3 }

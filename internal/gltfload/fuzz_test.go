@@ -2,6 +2,11 @@ package gltfload
 
 import (
 	"bytes"
+	"encoding/base64"
+	"image"
+	"image/color"
+	"image/png"
+	"math"
 	"testing"
 	"testing/fstest"
 
@@ -37,6 +42,51 @@ func quadDoc() *gltf.Document {
 	return doc
 }
 
+// testPNG is a 4x4 image, transparent on the left when holes is set.
+func testPNG(t testing.TB, holes bool) []byte {
+	img := image.NewNRGBA(image.Rect(0, 0, 4, 4))
+	for y := range 4 {
+		for x := range 4 {
+			c := color.NRGBA{uint8(x * 60), uint8(y * 60), 255, 255}
+			if holes && x < 2 {
+				c.A = 0
+			}
+			img.SetNRGBA(x, y, c)
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// texturedDoc is quadDoc with a base colour texture using the second
+// texture coordinate set. The image is stored as where says: in a buffer
+// "view", a "data" URI, or a "file" named "tex file.png".
+func texturedDoc(t testing.TB, where string, holes bool, mode gltf.AlphaMode) *gltf.Document {
+	doc := quadDoc()
+	data := testPNG(t, holes)
+	switch where {
+	case "view":
+		if _, err := modeler.WriteImage(doc, "tex", "image/png", bytes.NewReader(data)); err != nil {
+			t.Fatal(err)
+		}
+	case "data":
+		doc.Images = append(doc.Images, &gltf.Image{URI: "data:image/png;base64," + base64.StdEncoding.EncodeToString(data)})
+	case "file":
+		doc.Images = append(doc.Images, &gltf.Image{URI: "tex%20file.png"})
+	}
+	doc.Textures = []*gltf.Texture{{Source: new(0)}}
+	p := doc.Meshes[0].Primitives[0]
+	p.Attributes[gltf.TEXCOORD_0] = modeler.WriteTextureCoord(doc, [][2]float32{{9, 9}, {9, 9}, {9, 9}, {9, 9}})
+	p.Attributes[gltf.TEXCOORD_1] = modeler.WriteTextureCoord(doc, [][2]float32{{0, 0}, {2, 0}, {2, 1}, {0, 1}})
+	mat := doc.Materials[0]
+	mat.PBRMetallicRoughness.BaseColorTexture = &gltf.TextureInfo{Index: 0, TexCoord: 1}
+	mat.AlphaMode = mode
+	return doc
+}
+
 func encode(t testing.TB, doc *gltf.Document, binary bool) []byte {
 	var buf bytes.Buffer
 	enc := gltf.NewEncoder(&buf)
@@ -52,13 +102,17 @@ func FuzzLoad(f *testing.F) {
 	f.Add(encode(f, quadDoc(), false))
 	f.Add([]byte(`{"asset":{"version":"2.0"},"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":5}}]}]}`))
 	f.Add([]byte(`{"asset":{"version":"2.0"},"scene":3,"nodes":[{"children":[0]}]}`))
+	f.Add(encode(f, texturedDoc(f, "view", true, gltf.AlphaMask), true))
+	f.Add(encode(f, texturedDoc(f, "data", false, gltf.AlphaOpaque), false))
+	f.Add(encode(f, texturedDoc(f, "file", true, gltf.AlphaBlend), false))
+	// External files come from memory, never the real disk.
+	fsys := fstest.MapFS{"tex file.png": {Data: testPNG(f, true)}}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var doc gltf.Document
-		// An empty file system keeps external buffer URIs off the real disk.
-		if err := gltf.NewDecoderFS(bytes.NewReader(data), fstest.MapFS{}).Decode(&doc); err != nil {
+		if err := gltf.NewDecoderFS(bytes.NewReader(data), fsys).Decode(&doc); err != nil {
 			return
 		}
-		m, err := load(&doc, "fuzz")
+		m, err := load(&doc, "fuzz", fsys)
 		if err != nil {
 			return
 		}
@@ -73,6 +127,14 @@ func FuzzLoad(f *testing.F) {
 				for _, i := range n.Mesh.Indices {
 					if int(i) >= nv {
 						t.Fatalf("%s: index %d out of range (%d vertices)", n.Name, i, nv)
+					}
+				}
+				if want := nv * 2; n.Mesh.Texture == nil && len(n.Mesh.UVs) != 0 || n.Mesh.Texture != nil && len(n.Mesh.UVs) != want {
+					t.Fatalf("%s: textured %v with %d UVs for %d vertices", n.Name, n.Mesh.Texture != nil, len(n.Mesh.UVs), nv)
+				}
+				for _, v := range n.Mesh.UVs {
+					if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+						t.Fatalf("%s: invalid UV %g", n.Name, v)
 					}
 				}
 				triangles += n.Mesh.TriangleCount()

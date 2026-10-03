@@ -3,7 +3,6 @@ package meshload
 import (
 	"archive/zip"
 	"bytes"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,8 +10,7 @@ import (
 
 // addSamples seeds f with the test data files that have the given extension.
 func addSamples(f *testing.F, ext string) {
-	files, _ := filepath.Glob(filepath.Join("..", "..", "testdata", "*"+ext))
-	for _, p := range files {
+	for _, p := range sampleFiles(ext) {
 		data, err := os.ReadFile(p)
 		if err != nil {
 			f.Fatal(err)
@@ -35,17 +33,15 @@ func FuzzSTL(f *testing.F) {
 }
 
 func FuzzOBJ(f *testing.F) {
-	// The OBJ text, then a NUL and the material library it may refer to.
+	// The OBJ text, then NULs before the material library and the texture
+	// it may refer to.
 	addSamples(f, ".obj")
 	f.Add([]byte("mtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0 0 1 0\nvn 0 0 1\ng a\nusemtl x\nf 1//1 2//1 -1//1\ng b\nf 1/1 2 3 \\\n 1\n\x00newmtl x\nKd 1 0.5\n"))
+	f.Add([]byte("mtllib m.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvt 0 0\nvt 1 0 0\nvt 1 1\nusemtl x\nf 1/1 2/2 3/3\nusemtl y\nf 1/-1 2/-2 3/-3\nf 1 2 3\n\x00newmtl x\nmap_Kd -s 2 2 -clamp on t.png\nnewmtl y\nKd 1 0 0\nmap_Kd -o 0.5 t.png\nmap_d t.png\n\x00" + string(halfPNG(f))))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		obj, mtl, _ := bytes.Cut(data, []byte{0})
-		m, err := loadOBJ(obj, "fuzz", func(name string) ([]byte, error) {
-			if name != "m.mtl" {
-				return nil, fs.ErrNotExist
-			}
-			return mtl, nil
-		})
+		parts := bytes.SplitN(data, []byte{0}, 3)
+		parts = append(parts, nil, nil)
+		m, err := loadOBJ(parts[0], "fuzz", files(map[string][]byte{"m.mtl": parts[1], "t.png": parts[2]}))
 		if err == nil {
 			checkModel(t, m)
 		}
@@ -73,17 +69,34 @@ func Fuzz3MF(f *testing.F) {
 		zr.Close()
 	}
 	f.Add([]byte(tmfRoot), []byte(tmfPart))
+	f.Add([]byte(tmfTextured), []byte(tmfPart))
+	tex := string(opaquePNG(f))
 	f.Fuzz(func(t *testing.T, root, part []byte) {
 		data := make3MF(t, map[string]string{
 			"_rels/.rels":           tmfRels,
 			"3D/main.model":         string(root),
 			"3D/Objects/part.model": string(part),
+			"3D/Texture/tex.png":    tex,
 		})
 		zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if m, err := load3MF(zr, "fuzz"); err == nil {
+			checkModel(t, m)
+		}
+	})
+}
+
+func Fuzz3DS(f *testing.F) {
+	addSamples(f, ".3ds")
+	f.Add(sample3DS())
+	f.Add(texturedTDS())
+	// Every texture is the same image.
+	tex := halfPNG(f)
+	open := func(string) ([]byte, error) { return tex, nil }
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if m, err := loadTDS(data, "fuzz", open); err == nil {
 			checkModel(t, m)
 		}
 	})

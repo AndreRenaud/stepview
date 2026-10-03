@@ -30,12 +30,12 @@ type loadResult struct {
 	dur  time.Duration
 }
 
-// loadModel reads a STEP, glTF, OBJ, STL or 3MF file.
+// loadModel reads a STEP, glTF, OBJ, STL, 3MF or 3DS file.
 func loadModel(path string, progress func(string, float64)) (*step.Model, error) {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".gltf", ".glb":
 		return gltfload.LoadFile(path)
-	case ".obj", ".stl", ".3mf":
+	case ".obj", ".stl", ".3mf", ".3ds":
 		return meshload.LoadFile(path)
 	}
 	opt := step.DefaultOptions()
@@ -152,7 +152,7 @@ func (r *Root) openDialog() {
 			Title("Open model").
 			Filter("STEP files", "step", "stp", "p21").
 			Filter("glTF files", "gltf", "glb").
-			Filter("Mesh files", "obj", "stl", "3mf").
+			Filter("Mesh files", "obj", "stl", "3mf", "3ds").
 			Load()
 		if err != nil {
 			if !errors.Is(err, dialog.ErrCancelled) {

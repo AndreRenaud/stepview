@@ -42,7 +42,8 @@ FUZZ_TARGETS := \
 	./internal/gltfload:FuzzLoad \
 	./internal/meshload:FuzzSTL \
 	./internal/meshload:FuzzOBJ \
-	./internal/meshload:Fuzz3MF
+	./internal/meshload:Fuzz3MF \
+	./internal/meshload:Fuzz3DS
 
 .PHONY: all build test fuzz check app install universal clean
 
