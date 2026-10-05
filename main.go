@@ -26,7 +26,8 @@ func main() {
 		os.Exit(2)
 	}
 	if len(os.Args) == 2 {
-		root.pendingPath = argPath(os.Args[1])
+		src := fileSource(argPath(os.Args[1]))
+		root.pending = &src
 	}
 	root.openDocs = watchOpenDocuments()
 	root.menuCommands, root.nativeMenu = installMenus()

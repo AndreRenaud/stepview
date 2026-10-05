@@ -327,7 +327,7 @@ func (v *view3D) HandlePointingInput(context *guigui.Context, widgetBounds *guig
 			}
 		}
 		if _, wy := ebiten.Wheel(); wy != 0 && v.doc != nil {
-			v.zoom(math.Pow(0.85, wy), pos.Sub(b.Min))
+			v.zoom(math.Pow(0.85, wy/wheelNotch), pos.Sub(b.Min))
 			v.cameraMoved()
 			return guigui.AbortHandlingInputByWidget(v)
 		}
@@ -394,6 +394,12 @@ func (v *view3D) pickAt(context *guigui.Context, p image.Point) int {
 // zoom scales the camera distance, keeping the point under the cursor
 // fixed on the focal plane.
 func (v *view3D) zoom(factor float64, cursor image.Point) {
+	// Stay within reach of the model: a distance that underflows to zero
+	// can never be zoomed out of again.
+	if v.doc != nil && !v.doc.bounds.Empty() && v.orbit.dist > 0 {
+		r := math.Max(v.doc.bounds.Diag()/2, 1e-6)
+		factor = min(max(v.orbit.dist*factor, r*1e-4), r*100) / v.orbit.dist
+	}
 	if o, d, ok := v.ray(cursor); ok {
 		_, _, back := v.orbit.basis()
 		// Intersect the cursor ray with the plane through the target.

@@ -2,6 +2,7 @@ package meshload
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -13,16 +14,32 @@ import (
 	"github.com/AndreRenaud/stepview/internal/step"
 )
 
-// Load3MF reads a 3MF file: the build items of its root model, with their
-// components (including production extension references into other model
-// parts), colours from base materials and colour groups, and textures.
-func Load3MF(path string) (*step.Model, error) {
-	zr, err := zip.OpenReader(path)
+// read3MF reads the 3MF package name in fsys, in place if the file allows
+// it.
+func read3MF(fsys fs.FS, name, base string) (*step.Model, error) {
+	f, err := fsys.Open(name)
 	if err != nil {
 		return nil, err
 	}
-	defer zr.Close()
-	return load3MF(&zr.Reader, baseName(path))
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	ra, ok := f.(io.ReaderAt)
+	size := st.Size()
+	if !ok {
+		data, err := io.ReadAll(f)
+		if err != nil {
+			return nil, err
+		}
+		ra, size = bytes.NewReader(data), int64(len(data))
+	}
+	zr, err := zip.NewReader(ra, size)
+	if err != nil {
+		return nil, err
+	}
+	return load3MF(zr, base)
 }
 
 // Components can reuse an object many times over, so a small file can
@@ -93,6 +110,9 @@ type tmfLoader struct {
 	warnings []string
 }
 
+// load3MF reads a 3MF file: the build items of its root model, with their
+// components (including production extension references into other model
+// parts), colours from base materials and colour groups, and textures.
 func load3MF(zr *zip.Reader, name string) (*step.Model, error) {
 	l := &tmfLoader{
 		files:  map[string]*zip.File{},

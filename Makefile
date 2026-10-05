@@ -7,6 +7,8 @@
 #   make app          build build/StepView.app
 #   make install      copy the app bundle into /Applications
 #   make universal    build the app bundle for both arm64 and amd64
+#   make web          build build/web, a static web site of the viewer
+#   make serve        build build/web and serve it on http://localhost:$(PORT)
 #   make clean        remove build output
 
 GO          ?= go
@@ -26,8 +28,11 @@ INSTALL_DIR ?= /Applications
 BIN   := bin
 BUILD := build
 APP   := $(BUILD)/$(APP_NAME).app
+WEB   := $(BUILD)/web
+PORT  ?= 8080
 
-GO_SRC := go.mod go.sum $(shell find . \( -name '*.go' -o -name '*.m' \) -not -path './$(BUILD)/*')
+# The demo model is built in (see demo/benchy.sh).
+GO_SRC := go.mod go.sum demo/3DBenchy.step.gz $(shell find . \( -name '*.go' -o -name '*.m' \) -not -path './$(BUILD)/*' -not -path './3DBenchy/*')
 
 # Fuzz targets as package:FuzzName; go test runs one fuzz target at a time.
 FUZZTIME    ?= 30s
@@ -45,7 +50,7 @@ FUZZ_TARGETS := \
 	./internal/meshload:Fuzz3MF \
 	./internal/meshload:Fuzz3DS
 
-.PHONY: all build test fuzz check app install universal clean
+.PHONY: all build test fuzz check app install universal web serve clean
 
 all: build
 
@@ -75,6 +80,7 @@ check:
 	gofmt -l -w .
 	$(GO) fix ./...
 	$(GO) vet ./...
+	GOOS=js GOARCH=wasm $(GO) vet .
 
 # One executable per architecture. cgo is needed for the native file dialog;
 # Apple's clang targets either architecture, so no cross toolchain is needed.
@@ -116,6 +122,20 @@ install: app
 	rm -rf '$(INSTALL_DIR)/$(APP_NAME).app'
 	ditto $(APP) '$(INSTALL_DIR)/$(APP_NAME).app'
 	@echo "Installed $(INSTALL_DIR)/$(APP_NAME).app"
+
+# The browser version. index.html holds the menus and file dialog around
+# viewer.html, which runs the viewer full window as Ebitengine expects.
+# wasm_exec.js must come from the Go that built stepview.wasm.
+web: $(WEB)/stepview.wasm
+	install -m 644 web/index.html web/viewer.html $(WEB)/
+	install -m 644 "$$($(GO) env GOROOT)/lib/wasm/wasm_exec.js" $(WEB)/
+	@echo "Built $(WEB)"
+
+$(WEB)/stepview.wasm: $(GO_SRC) | check
+	GOOS=js GOARCH=wasm $(GO) build -trimpath -ldflags='-s -w' -o $@ .
+
+serve: web
+	python3 -m http.server --directory $(WEB) $(PORT)
 
 clean:
 	rm -rf $(BIN) $(BUILD)

@@ -6,24 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
-	"path/filepath"
 
 	"github.com/AndreRenaud/stepview/internal/step"
 )
-
-// LoadTDS reads an Autodesk 3D Studio (.3ds) file: its triangle meshes,
-// material diffuse colours, transparency and textures, smoothing groups, and the object
-// hierarchy from the keyframer. 3DS has no units; it is Z up and taken as
-// millimetres. Mesh vertices are stored in world space, so the hierarchy
-// only groups objects and every node has an identity transform.
-func LoadTDS(path string) (*step.Model, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return loadTDS(data, baseName(path), dirOpener(filepath.Dir(path)))
-}
 
 // 3DS chunk identifiers.
 const (
@@ -118,7 +103,12 @@ func cstring(b []byte) (string, []byte) {
 	return string(before), after
 }
 
-// loadTDS parses a 3DS file; open reads a texture named in it.
+// loadTDS reads an Autodesk 3D Studio (.3ds) file: its triangle meshes,
+// material diffuse colours, transparency and textures, smoothing groups, and the object
+// hierarchy from the keyframer. 3DS has no units; it is Z up and taken as
+// millimetres. Mesh vertices are stored in world space, so the hierarchy
+// only groups objects and every node has an identity transform.
+// open reads a texture named in it.
 func loadTDS(data []byte, name string, open func(string) ([]byte, error)) (*step.Model, error) {
 	if len(data) < 6 || binary.LittleEndian.Uint16(data) != tdsMain {
 		return nil, errors.New("3ds: not a 3D Studio file")

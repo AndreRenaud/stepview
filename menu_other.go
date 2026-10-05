@@ -1,4 +1,4 @@
-//go:build !darwin || !cgo
+//go:build !js && (!darwin || !cgo)
 
 package main
 

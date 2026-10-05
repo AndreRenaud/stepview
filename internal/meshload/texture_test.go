@@ -10,10 +10,9 @@ import (
 	"image/png"
 	"io/fs"
 	"math"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/AndreRenaud/stepview/internal/step"
 )
@@ -58,7 +57,7 @@ func holesPNG(t testing.TB) []byte {
 	})
 }
 
-// files serves in-memory files by name, in place of dirOpener.
+// files serves in-memory files by name, in place of fsOpener.
 func files(m map[string][]byte) func(string) ([]byte, error) {
 	return func(name string) ([]byte, error) {
 		if d, ok := m[name]; ok {
@@ -184,33 +183,31 @@ func TestWithMask(t *testing.T) {
 }
 
 func TestFindFile(t *testing.T) {
-	dir := t.TempDir()
-	for _, p := range []string{"Maps/Label.JPG", "sub/a b.png", "top.png"} {
-		p = filepath.Join(dir, filepath.FromSlash(p))
-		os.MkdirAll(filepath.Dir(p), 0o755)
-		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	fsys := fstest.MapFS{}
+	for _, p := range []string{"Maps/Label.JPG", "sub/a b.png", "top.png", "model/m.obj", "model/tex/t.png"} {
+		fsys[p] = &fstest.MapFile{Data: []byte("x")}
 	}
-	for ref, want := range map[string]string{
-		`C:\models\maps\LABEL.jpg`: "Maps/Label.JPG",
-		"sub/a b.png":              "sub/a b.png",
-		`sub\a b.png`:              "sub/a b.png",
-		"/elsewhere/top.png":       "top.png",
-		"TOP.PNG":                  "top.png",
-		"missing.png":              "",
-		"sub/":                     "",
+	for _, tc := range []struct{ dir, ref, want string }{
+		{".", `C:\models\maps\LABEL.jpg`, "Maps/Label.JPG"},
+		{".", "sub/a b.png", "sub/a b.png"},
+		{".", `sub\a b.png`, "sub/a b.png"},
+		{".", "/elsewhere/top.png", "top.png"},
+		{".", "TOP.PNG", "top.png"},
+		{".", "missing.png", ""},
+		{".", "sub/", ""},
+		{"model", "tex/t.png", "model/tex/t.png"},
+		{"model", "../top.png", "top.png"},
+		{"model", "../../top.png", ""},
 	} {
-		got, ok := findFile(dir, ref)
-		if want == "" {
+		got, ok := findFile(fsys, tc.dir, tc.ref)
+		if tc.want == "" {
 			if ok {
-				t.Errorf("%q: found %s", ref, got)
+				t.Errorf("%s in %s: found %s", tc.ref, tc.dir, got)
 			}
 			continue
 		}
-		// Case insensitive file systems find the name as given.
-		if !ok || !strings.EqualFold(got, filepath.Join(dir, filepath.FromSlash(want))) {
-			t.Errorf("%q: got %s, %v", ref, got, ok)
+		if !ok || got != tc.want {
+			t.Errorf("%s in %s: got %s, %v", tc.ref, tc.dir, got, ok)
 		}
 	}
 }

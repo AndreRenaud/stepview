@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STEP Viewer</title>
+<style>
+  :root {
+    --bg: #ececee;
+    --fg: #55555a;
+    --accent: #2f6fde;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1e1e21;
+      --fg: #a1a1a6;
+    }
+  }
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  #status {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    text-align: center;
+  }
+  #drop {
+    position: fixed;
+    inset: 10px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    border: 3px dashed var(--accent);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+    font-size: 18px;
+    font-weight: 600;
+    /* The drop has to reach the canvas underneath. */
+    pointer-events: none;
+    z-index: 1;
+  }
+  #drop.on {
+    display: flex;
+  }
+</style>
+</head>
+<body>
+<div id="status">Loading viewer…</div>
+<div id="drop">Drop to open</div>
+<script src="wasm_exec.js"></script>
+<script>
+"use strict";
+(async () => {
+  const status = document.getElementById("status");
+  const drop = document.getElementById("drop");
+
+  // Show where files can be dropped. Ebitengine's canvas takes the drop
+  // itself; until it is there, a drop must not navigate away.
+  let depth = 0;
+  window.addEventListener("dragenter", (e) => {
+    if (e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")) {
+      depth++;
+      drop.classList.add("on");
+    }
+  });
+  window.addEventListener("dragleave", () => {
+    if (--depth <= 0) {
+      depth = 0;
+      drop.classList.remove("on");
+    }
+  });
+  window.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("drop", (e) => {
+    e.preventDefault();
+    depth = 0;
+    drop.classList.remove("on");
+  });
+
+  try {
+    // The page around the viewer, if any (index.html), provides the menus
+    // and the file dialog.
+    try {
+      if (window.parent !== window && window.parent.stepview) {
+        window.stepview = window.parent.stepview;
+      }
+    } catch (e) {
+      // The parent is on another origin; run without it.
+    }
+    if (typeof WebAssembly !== "object") {
+      throw new Error("This browser does not support WebAssembly.");
+    }
+    const go = new Go();
+    // guigui otherwise polls the system clipboard every second, which
+    // browsers answer with errors or a permission prompt. The viewer has
+    // no text to copy or paste.
+    go.env = { GUIGUI_DEBUG: "emulateclipboard" };
+    let result;
+    try {
+      result = await WebAssembly.instantiateStreaming(fetch("stepview.wasm"), go.importObject);
+    } catch (e) {
+      // Servers that do not send application/wasm need the slow way.
+      const r = await fetch("stepview.wasm");
+      if (!r.ok) throw new Error(`stepview.wasm: HTTP status ${r.status}`);
+      result = await WebAssembly.instantiate(await r.arrayBuffer(), go.importObject);
+    }
+    status.remove();
+    await go.run(result.instance);
+  } catch (e) {
+    status.textContent = "The viewer could not start: " + e.message;
+    console.error(e);
+  }
+})();
+</script>
+</body>
+</html>

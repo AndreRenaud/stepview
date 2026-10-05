@@ -429,7 +429,25 @@ func (r *renderer) drawRanges(dst *ebiten.Image, verts []ebiten.Vertex, indices 
 		op.Uniforms["Textured"] = flags[0]
 		op.Uniforms["Cutout"] = flags[1]
 		op.Uniforms["Blend"] = flags[2]
+		fillImages(op.Images[:])
 		dst.DrawTrianglesShader32(verts[rg.vStart:rg.vEnd], indices[rg.iStart:rg.iEnd], r.shader, op)
+	}
+}
+
+// noImage fills the shader image slots that a draw does not use: for an
+// empty slot, Ebitengine leaves the texture that was bound before, and
+// WebGL refuses to draw when that is the destination (a feedback loop)
+// even if the shader never reads it.
+var noImage = sync.OnceValue(func() *ebiten.Image {
+	return ebiten.NewImageWithOptions(image.Rect(0, 0, 1, 1), &ebiten.NewImageOptions{Unmanaged: true})
+})
+
+// fillImages puts noImage in the empty slots of a draw's images.
+func fillImages(imgs []*ebiten.Image) {
+	for i, img := range imgs {
+		if img == nil {
+			imgs[i] = noImage()
+		}
 	}
 }
 

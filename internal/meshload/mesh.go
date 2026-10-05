@@ -5,7 +5,10 @@ package meshload
 
 import (
 	"fmt"
+	"io/fs"
 	"math"
+	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -26,22 +29,47 @@ var creaseCos = float32(math.Cos(35 * math.Pi / 180))
 
 // LoadFile reads an OBJ, STL, 3MF or 3DS file, chosen by its extension.
 func LoadFile(path string) (*step.Model, error) {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".obj":
-		return LoadOBJ(path)
-	case ".stl":
-		return LoadSTL(path)
-	case ".3mf":
-		return Load3MF(path)
-	case ".3ds":
-		return LoadTDS(path)
-	}
-	return nil, fmt.Errorf("meshload: unsupported file type %q", filepath.Ext(path))
+	return LoadFS(OSFS(path))
 }
 
-// baseName is the file name without its directory or extension.
-func baseName(path string) string {
-	return strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+// LoadFS reads an OBJ, STL, 3MF or 3DS file from fsys, chosen by its
+// extension. The textures and material libraries it refers to are looked
+// for in fsys too.
+func LoadFS(fsys fs.FS, name string) (*step.Model, error) {
+	ext := strings.ToLower(path.Ext(name))
+	switch ext {
+	case ".obj", ".stl", ".3mf", ".3ds":
+	default:
+		return nil, fmt.Errorf("meshload: unsupported file type %q", path.Ext(name))
+	}
+	base := strings.TrimSuffix(path.Base(name), path.Ext(name))
+	if ext == ".3mf" {
+		return read3MF(fsys, name, base)
+	}
+	data, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		return nil, err
+	}
+	open := fsOpener(fsys, path.Dir(name))
+	switch ext {
+	case ".obj":
+		return loadOBJ(data, base, open)
+	case ".stl":
+		return loadSTL(data, base)
+	}
+	return loadTDS(data, base, open)
+}
+
+// OSFS returns a file system for the operating system's files and the name
+// of path within it. The file system is rooted at the top of path's volume,
+// so files that a model refers to can be found wherever they are.
+func OSFS(path string) (fs.FS, string) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return os.DirFS("."), filepath.ToSlash(path)
+	}
+	vol := filepath.VolumeName(abs)
+	return os.DirFS(vol + string(filepath.Separator)), filepath.ToSlash(strings.TrimLeft(abs[len(vol):], `/\`))
 }
 
 // builder collects triangles as a soup and turns them into an indexed mesh.

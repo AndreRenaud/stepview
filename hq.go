@@ -501,5 +501,6 @@ func fullscreen(dst *ebiten.Image, s *ebiten.Shader, uniforms map[string]any, sr
 	}
 	op := &ebiten.DrawTrianglesShaderOptions{Blend: ebiten.BlendCopy, Uniforms: uniforms}
 	copy(op.Images[:], srcs)
+	fillImages(op.Images[:])
 	dst.DrawTrianglesShader32(vs, []uint32{0, 1, 2, 1, 3, 2}, s, op)
 }

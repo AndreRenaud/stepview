@@ -7,23 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"strconv"
 	"strings"
 
 	"github.com/AndreRenaud/stepview/internal/step"
 )
 
-// LoadSTL reads a binary or ASCII STL file. STL has no units; like most
+// loadSTL reads a binary or ASCII STL file. STL has no units; like most
 // CAD and 3D printing software, it is taken to be millimetres with Z up.
-func LoadSTL(path string) (*step.Model, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return loadSTL(data, baseName(path))
-}
-
 func loadSTL(data []byte, name string) (*step.Model, error) {
 	var parts []stlPart
 	var err error

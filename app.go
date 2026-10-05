@@ -1,14 +1,12 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"image"
 	"math"
-	"path/filepath"
+	"path"
 	"runtime"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,31 +15,15 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
-	"github.com/sqweek/dialog"
 
-	"github.com/AndreRenaud/stepview/internal/gltfload"
-	"github.com/AndreRenaud/stepview/internal/meshload"
 	"github.com/AndreRenaud/stepview/internal/step"
 )
 
 type loadResult struct {
-	path string
+	name string // the file's base name
 	doc  *document
 	err  error
 	dur  time.Duration
-}
-
-// loadModel reads a STEP, glTF, OBJ, STL, 3MF or 3DS file.
-func loadModel(path string, progress func(string, float64)) (*step.Model, error) {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".gltf", ".glb":
-		return gltfload.LoadFile(path)
-	case ".obj", ".stl", ".3mf", ".3ds":
-		return meshload.LoadFile(path)
-	}
-	opt := step.DefaultOptions()
-	opt.Progress = progress
-	return step.LoadFile(path, opt)
 }
 
 // Root is the application window.
@@ -55,6 +37,7 @@ type Root struct {
 	splitter    splitter
 	view        view3D
 	placeholder basicwidget.Text
+	demoLink    link
 	info        infoPanel
 	capture     captureOverlay
 	bench       *benchmark
@@ -63,11 +46,12 @@ type Root struct {
 	scriptPending bool
 	scriptDelay   int
 
-	// pendingPath is loaded once nothing else is loading. It comes from
-	// the command line or from openDocs (Finder).
-	pendingPath string
-	openDocs    <-chan string
-	started     bool
+	// pending is loaded once nothing else is loading. It comes from the
+	// command line, openDocs (Finder, or the web page) or files dropped on
+	// the window.
+	pending  *modelSource
+	openDocs <-chan modelSource
+	started  bool
 
 	// menuCommands delivers commands chosen in the native menu bar; without
 	// one (nativeMenu false) Tick reads the shortcuts itself.
@@ -77,7 +61,7 @@ type Root struct {
 	menuChecked  uint32
 
 	loadCh   chan loadResult
-	dialogCh chan string
+	dialogCh chan modelSource
 	loading  bool
 
 	progressMu   sync.Mutex
@@ -116,7 +100,7 @@ func (r *Root) setStatus(s string) {
 	r.statusText = s
 }
 
-func (r *Root) startLoad(path string) {
+func (r *Root) startLoad(src modelSource) {
 	if r.loading {
 		return
 	}
@@ -124,45 +108,40 @@ func (r *Root) startLoad(path string) {
 		r.loadCh = make(chan loadResult, 1)
 	}
 	r.loading = true
-	r.setStatus("Loading " + filepath.Base(path) + "…")
+	r.setStatus("Loading…")
+	if src.name != "" {
+		r.setStatus("Loading " + path.Base(src.name) + "…")
+	}
+	setProgress := func(s string) {
+		r.progressMu.Lock()
+		r.progressText = s
+		r.progressMu.Unlock()
+		yieldUI()
+	}
+	r.progressMu.Lock()
+	r.progressText = ""
+	r.progressMu.Unlock()
 	go func() {
 		t0 := time.Now()
-		m, err := loadModel(path, func(stage string, f float64) {
-			r.progressMu.Lock()
-			r.progressText = fmt.Sprintf("Loading %s… %s %d%%", filepath.Base(path), stage, int(f*100))
-			r.progressMu.Unlock()
-		})
+		var err error
+		if src.name == "" {
+			src.name, err = findModel(src.fsys)
+		}
+		name := "the files"
 		var d *document
 		if err == nil {
-			r.progressMu.Lock()
-			r.progressText = fmt.Sprintf("Loading %s… preparing display", filepath.Base(path))
-			r.progressMu.Unlock()
-			d = newDocument(path, m)
-		}
-		r.loadCh <- loadResult{path: path, doc: d, err: err, dur: time.Since(t0)}
-	}()
-}
-
-func (r *Root) openDialog() {
-	if r.dialogCh == nil {
-		r.dialogCh = make(chan string, 1)
-	}
-	go func() {
-		// sqweek/dialog runs the native panel on the main thread itself; we
-		// only wait for the answer here.
-		path, err := dialog.File().
-			Title("Open model").
-			Filter("STEP files", "step", "stp", "p21").
-			Filter("glTF files", "gltf", "glb").
-			Filter("Mesh files", "obj", "stl", "3mf", "3ds").
-			Load()
-		if err != nil {
-			if !errors.Is(err, dialog.ErrCancelled) {
-				r.dialogCh <- ""
+			name = path.Base(src.name)
+			setProgress("Loading " + name + "…")
+			var m *step.Model
+			m, err = loadModel(src.fsys, src.name, func(stage string, f float64) {
+				setProgress(fmt.Sprintf("Loading %s… %s %d%%", name, stage, int(f*100)))
+			})
+			if err == nil {
+				setProgress(fmt.Sprintf("Loading %s… preparing display", name))
+				d = newDocument(src.name, m)
 			}
-			return
 		}
-		r.dialogCh <- path
+		r.loadCh <- loadResult{name: name, doc: d, err: err, dur: time.Since(t0)}
 	}()
 }
 
@@ -172,31 +151,31 @@ func (r *Root) Tick(context *guigui.Context, widgetBounds *guigui.WidgetBounds) 
 		r.revealNode = -1
 	}
 	select {
-	case path := <-r.openDocs:
-		r.pendingPath = path
+	case src := <-r.openDocs:
+		r.pending = &src
 	default:
 	}
-	if r.pendingPath != "" && !r.loading {
-		r.startLoad(r.pendingPath)
-		r.pendingPath = ""
+	if fsys := ebiten.DroppedFiles(); fsys != nil {
+		r.pending = &modelSource{fsys: fsys}
+	}
+	if r.pending != nil && !r.loading {
+		r.startLoad(*r.pending)
+		r.pending = nil
 	}
 	if err := r.handleCommands(context); err != nil {
 		return err
 	}
 	select {
-	case path := <-r.dialogCh:
-		if path != "" {
-			r.startLoad(path)
-		}
+	case src := <-r.dialogCh:
+		r.startLoad(src)
 	default:
 	}
 	select {
 	case res := <-r.loadCh:
 		r.loading = false
 		if res.err != nil {
-			r.setStatus(fmt.Sprintf("Failed to load %s: %v", filepath.Base(res.path), res.err))
-			msg := fmt.Sprintf("Could not load %s:\n%v", res.path, res.err)
-			go dialog.Message("%s", msg).Title("Load failed").Error()
+			r.setStatus(fmt.Sprintf("Failed to load %s: %v", res.name, res.err))
+			go showError("Load failed", fmt.Sprintf("Could not load %s:\n%v", res.name, res.err))
 		} else {
 			r.doc = res.doc
 			r.docSerial++
@@ -208,8 +187,8 @@ func (r *Root) Tick(context *guigui.Context, widgetBounds *guigui.WidgetBounds) 
 				extra = fmt.Sprintf(", %d faces failed", s.FailedFaces)
 			}
 			r.setStatus(fmt.Sprintf("%s — %d parts, %s triangles%s (%.1fs)",
-				filepath.Base(res.path), len(r.doc.insts), humanCount(r.doc.triangles), extra, res.dur.Seconds()))
-			context.SetWindowTitle(filepath.Base(res.path) + " — STEP Viewer")
+				res.name, len(r.doc.insts), humanCount(r.doc.triangles), extra, res.dur.Seconds()))
+			setTitle(context, res.name+" — STEP Viewer")
 			if r.bench == nil {
 				r.capture.arm(30)
 			}
@@ -396,6 +375,9 @@ func (r *Root) Build(context *guigui.Context, adder *guigui.ChildAdder) error {
 	adder.AddWidget(&r.view)
 	if r.doc == nil {
 		adder.AddWidget(&r.placeholder)
+		if !r.loading {
+			adder.AddWidget(&r.demoLink)
+		}
 	}
 	if r.doc != nil && r.doc.selected >= 0 {
 		name := r.doc.nodes[r.doc.selected].name
@@ -421,6 +403,11 @@ func (r *Root) Build(context *guigui.Context, adder *guigui.ChildAdder) error {
 	}
 	r.placeholder.SetHorizontalAlign(basicwidget.HorizontalAlignCenter)
 	r.placeholder.SetVerticalAlign(basicwidget.VerticalAlignMiddle)
+	r.demoLink.SetValue("Load Benchy Demo")
+	r.demoLink.OnClicked(func(context *guigui.Context) {
+		src := demoSource()
+		r.pending = &src
+	})
 
 	r.splitter.OnMoved(func(context *guigui.Context, dx int) {
 		r.treeWidth = max(basicwidget.UnitSize(context)*4, r.currentTreeWidth(context)+dx)
@@ -517,8 +504,14 @@ func (r *Root) Layout(context *guigui.Context, widgetBounds *guigui.WidgetBounds
 	}
 	layouter.LayoutWidget(&r.view, vb)
 	if r.doc == nil {
-		// The placeholder covers the 3D view.
+		// The placeholder covers the 3D view, with the demo link below its
+		// text.
 		layouter.LayoutWidget(&r.placeholder, vb)
+		text := r.placeholder.Measure(context, guigui.Constraints{})
+		s := r.demoLink.Measure(context, guigui.Constraints{})
+		c := image.Pt((vb.Min.X+vb.Max.X)/2, (vb.Min.Y+vb.Max.Y)/2)
+		y := c.Y + text.Y/2 + u/4
+		layouter.LayoutWidget(&r.demoLink, image.Rect(c.X-s.X/2, y, c.X-s.X/2+s.X, y+s.Y))
 	}
 	// The selection's info panel sits in the top-right corner of the view.
 	m := u / 2

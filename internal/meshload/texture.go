@@ -11,9 +11,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io/fs"
-	"os"
 	"path"
-	"path/filepath"
 	"strings"
 
 	_ "golang.org/x/image/bmp"
@@ -116,7 +114,7 @@ func WithMask(t *step.Texture, mask image.Image) *step.Texture {
 
 // textures loads and caches the texture files a model refers to.
 type textures struct {
-	open  func(ref string) ([]byte, error) // see dirOpener
+	open  func(ref string) ([]byte, error) // see fsOpener
 	cache map[string]*step.Texture
 	warn  func(format string, args ...any)
 }
@@ -125,14 +123,15 @@ func newTextures(open func(string) ([]byte, error), warn func(string, ...any)) *
 	return &textures{open: open, cache: map[string]*step.Texture{}, warn: warn}
 }
 
-// dirOpener reads the files a model in dir refers to (see findFile).
-func dirOpener(dir string) func(string) ([]byte, error) {
+// fsOpener reads the files that a model in dir of fsys refers to (see
+// findFile).
+func fsOpener(fsys fs.FS, dir string) func(string) ([]byte, error) {
 	return func(ref string) ([]byte, error) {
-		path, ok := findFile(dir, ref)
+		name, ok := findFile(fsys, dir, ref)
 		if !ok {
 			return nil, fs.ErrNotExist
 		}
-		return os.ReadFile(path)
+		return fs.ReadFile(fsys, name)
 	}
 }
 
@@ -167,18 +166,18 @@ func (t *textures) load(ref, mask string) *step.Texture {
 	return tex
 }
 
-// findFile locates a file that a model refers to as ref, which may be an
-// absolute or Windows path, or differ in case from the file on disk (as
-// old 8.3 names in 3DS files do). It looks for the path relative to dir,
-// then for the bare file name in dir and its texture subdirectories.
-func findFile(dir, ref string) (string, bool) {
+// findFile locates a file that a model in dir of fsys refers to as ref,
+// which may be an absolute or Windows path, or differ in case from the file's
+// name (as old 8.3 names in 3DS files do). It looks for the path relative to
+// dir, then for the bare file name in dir and its texture subdirectories.
+func findFile(fsys fs.FS, dir, ref string) (string, bool) {
 	ref = strings.ReplaceAll(ref, `\`, "/")
 	exists := func(p string) bool {
-		st, err := os.Stat(p)
+		st, err := fs.Stat(fsys, p)
 		return err == nil && !st.IsDir()
 	}
-	if !filepath.IsAbs(ref) && !strings.Contains(ref, ":") {
-		if p := filepath.Join(dir, filepath.FromSlash(ref)); exists(p) {
+	if !path.IsAbs(ref) && !strings.Contains(ref, ":") {
+		if p := path.Join(dir, ref); exists(p) {
 			return p, true
 		}
 	}
@@ -187,17 +186,17 @@ func findFile(dir, ref string) (string, bool) {
 		return "", false
 	}
 	for _, sub := range []string{"", "textures", "Textures", "maps", "Maps", "images", "tex"} {
-		d := filepath.Join(dir, sub)
-		if p := filepath.Join(d, base); exists(p) {
+		d := path.Join(dir, sub)
+		if p := path.Join(d, base); exists(p) {
 			return p, true
 		}
-		entries, err := os.ReadDir(d)
+		entries, err := fs.ReadDir(fsys, d)
 		if err != nil {
 			continue
 		}
 		for _, e := range entries {
 			if !e.IsDir() && strings.EqualFold(e.Name(), base) {
-				return filepath.Join(d, e.Name()), true
+				return path.Join(d, e.Name()), true
 			}
 		}
 	}

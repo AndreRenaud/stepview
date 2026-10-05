@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STEP Viewer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 3 28 9.5v13L16 29 4 22.5v-13z' fill='%232f6fde'/%3E%3Cpath d='M16 16 28 9.5M16 16v13M16 16 4 9.5' stroke='%23fff' stroke-width='1.6' fill='none'/%3E%3C/svg%3E">
+<meta name="description" content="View STEP, glTF, OBJ, STL, 3MF and 3DS models in the browser. Files are opened locally and never uploaded.">
+<style>
+  :root {
+    --bar-h: 30px;
+    --bg: #f4f4f5;
+    --fg: #1d1d1f;
+    --muted: #8a8a8e;
+    --menu-bg: #ffffff;
+    --menu-border: rgba(0, 0, 0, 0.14);
+    --hover-bg: #2f6fde;
+    --hover-fg: #ffffff;
+    --shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #26262a;
+      --fg: #ececee;
+      --muted: #8e8e93;
+      --menu-bg: #2f2f34;
+      --menu-border: rgba(255, 255, 255, 0.14);
+      --shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    }
+  }
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.2 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+  }
+  #bar {
+    flex: none;
+    height: var(--bar-h);
+    display: flex;
+    align-items: stretch;
+    gap: 2px;
+    padding: 0 8px;
+    border-bottom: 1px solid var(--menu-border);
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #brand {
+    display: flex;
+    align-items: center;
+    font-weight: 600;
+    padding-right: 10px;
+  }
+  #hint {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #menus {
+    display: flex;
+  }
+  .menu {
+    position: relative;
+    display: flex;
+  }
+  .menu > button {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    margin: 4px 0;
+    padding: 0 9px;
+    border-radius: 5px;
+    cursor: default;
+  }
+  .menu.open > button {
+    background: var(--menu-border);
+  }
+  .items {
+    display: none;
+    position: absolute;
+    top: calc(100% - 2px);
+    left: 0;
+    z-index: 10;
+    min-width: 210px;
+    padding: 5px;
+    margin: 0;
+    list-style: none;
+    /* Not the hover colours of the item a submenu belongs to. */
+    color: var(--fg);
+    background: var(--menu-bg);
+    border: 1px solid var(--menu-border);
+    border-radius: 7px;
+    box-shadow: var(--shadow);
+  }
+  .menu.open > .items,
+  .item.sub:hover > .items,
+  .item.sub:focus-within > .items {
+    display: block;
+  }
+  .item.sub > .items {
+    top: -6px;
+    left: calc(100% - 4px);
+  }
+  .item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px 4px 4px;
+    border-radius: 4px;
+    white-space: nowrap;
+    cursor: default;
+  }
+  .item .check {
+    width: 14px;
+    text-align: center;
+    visibility: hidden;
+  }
+  .item.checked .check {
+    visibility: visible;
+  }
+  .item .label {
+    flex: 1;
+  }
+  .item .key {
+    color: var(--muted);
+    margin-left: 24px;
+    font-variant-numeric: tabular-nums;
+  }
+  .item:not(.disabled):hover,
+  .item:not(.disabled):focus-visible {
+    background: var(--hover-bg);
+    color: var(--hover-fg);
+    outline: none;
+  }
+  .item:not(.disabled):hover > .key {
+    color: inherit;
+  }
+  .item.disabled {
+    color: var(--muted);
+  }
+  .separator {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--menu-border);
+  }
+  #viewer {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    border: 0;
+    display: block;
+  }
+  #file {
+    display: none;
+  }
+  @media (max-width: 560px) {
+    #hint {
+      display: none;
+    }
+  }
+</style>
+</head>
+<body>
+<div id="bar">
+  <div id="brand">STEP Viewer</div>
+  <div id="menus"></div>
+  <div id="hint">STEP, glTF, OBJ, STL, 3MF and 3DS · files stay on your computer</div>
+</div>
+<iframe id="viewer" src="viewer.html" title="3D view" allow="fullscreen"></iframe>
+<input id="file" type="file" multiple
+  accept=".step,.stp,.p21,.gltf,.glb,.bin,.obj,.mtl,.stl,.3mf,.3ds,.tga,image/*">
+<script>
+"use strict";
+(() => {
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  const bar = document.getElementById("bar");
+  const menusEl = document.getElementById("menus");
+  const viewer = document.getElementById("viewer");
+  const fileInput = document.getElementById("file");
+
+  // Every command item: {el, item}. Shortcut lookups and state updates
+  // walk this list.
+  const commands = [];
+  let openCmd = -1;
+  let send = () => {};
+  let enabled = 0;
+  let checked = 0;
+  let openMenu = null;
+
+  const isEnabled = (cmd) => ((enabled >>> cmd) & 1) === 1;
+
+  function shortcutLabel(it) {
+    if (!it.key) return "";
+    const key = it.key.toUpperCase();
+    if (isMac) {
+      return (it.ctrl ? "⌃" : "") + (it.alt ? "⌥" : "") + (it.shift ? "⇧" : "") + "⌘" + key;
+    }
+    return "Ctrl+" + (it.alt || it.ctrl ? "Alt+" : "") + (it.shift ? "Shift+" : "") + key;
+  }
+
+  function focusViewer() {
+    try {
+      const canvas = viewer.contentDocument && viewer.contentDocument.querySelector("canvas");
+      viewer.contentWindow.focus();
+      if (canvas) canvas.focus();
+    } catch (e) {
+      // The viewer is on another origin; leave the focus alone.
+    }
+  }
+
+  function closeMenus() {
+    if (openMenu) openMenu.classList.remove("open");
+    openMenu = null;
+  }
+
+  function run(cmd) {
+    closeMenus();
+    if (!isEnabled(cmd)) return;
+    if (cmd === openCmd) {
+      // Browsers only show a file dialog in response to a user action, so
+      // it is opened here rather than by the viewer.
+      fileInput.click();
+      return;
+    }
+    send(cmd);
+    focusViewer();
+  }
+
+  function buildItems(items) {
+    const ul = document.createElement("ul");
+    ul.className = "items";
+    ul.setAttribute("role", "menu");
+    for (const it of items) {
+      const li = document.createElement("li");
+      if (it.separator) {
+        li.className = "separator";
+        li.setAttribute("role", "separator");
+        ul.appendChild(li);
+        continue;
+      }
+      li.className = "item";
+      li.tabIndex = -1;
+      li.innerHTML = '<span class="check">✓</span><span class="label"></span><span class="key"></span>';
+      li.querySelector(".label").textContent = it.title;
+      if (it.items) {
+        li.classList.add("sub");
+        li.setAttribute("role", "menuitem");
+        li.setAttribute("aria-haspopup", "true");
+        li.querySelector(".key").textContent = "▸";
+        li.appendChild(buildItems(it.items));
+      } else {
+        li.setAttribute("role", "menuitemcheckbox");
+        li.querySelector(".key").textContent = shortcutLabel(it);
+        li.addEventListener("click", (e) => {
+          e.stopPropagation();
+          run(it.cmd);
+        });
+        commands.push({ el: li, item: it });
+      }
+      ul.appendChild(li);
+    }
+    return ul;
+  }
+
+  function installMenus(menus, open, onCommand) {
+    openCmd = open;
+    send = (cmd) => onCommand(cmd);
+    menusEl.replaceChildren();
+    commands.length = 0;
+    for (const m of menus) {
+      const div = document.createElement("div");
+      div.className = "menu";
+      const button = document.createElement("button");
+      button.textContent = m.title;
+      button.setAttribute("aria-haspopup", "true");
+      div.append(button, buildItems(m.items));
+      button.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        if (openMenu === div) {
+          closeMenus();
+        } else {
+          closeMenus();
+          div.classList.add("open");
+          openMenu = div;
+        }
+      });
+      button.addEventListener("click", (e) => {
+        // Keyboard activation (Enter or Space) only; the mouse is handled
+        // on mousedown so that menus open as soon as they are pressed.
+        if (e.detail !== 0) return;
+        if (openMenu === div) {
+          closeMenus();
+        } else {
+          closeMenus();
+          div.classList.add("open");
+          openMenu = div;
+        }
+      });
+      // Moving across the bar with a menu open switches menus.
+      button.addEventListener("mouseenter", () => {
+        if (openMenu && openMenu !== div) {
+          closeMenus();
+          div.classList.add("open");
+          openMenu = div;
+        }
+      });
+      menusEl.appendChild(div);
+    }
+    setMenuState(enabled, checked);
+  }
+
+  function setMenuState(en, ch) {
+    enabled = en;
+    checked = ch;
+    for (const { el, item } of commands) {
+      const on = ((ch >>> item.cmd) & 1) === 1;
+      el.classList.toggle("disabled", !isEnabled(item.cmd));
+      el.classList.toggle("checked", on);
+      el.setAttribute("aria-disabled", String(!isEnabled(item.cmd)));
+      el.setAttribute("aria-checked", String(on));
+    }
+  }
+
+  // Shortcuts: the primary modifier is Command on macOS and Control
+  // elsewhere, where Alt stands in for both Option and Control.
+  function onKeyDown(e) {
+    if (e.key === "Escape" && openMenu) {
+      closeMenus();
+      return;
+    }
+    const primary = isMac ? e.metaKey : e.ctrlKey;
+    if (!primary) return;
+    const m = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(e.code);
+    if (!m) return;
+    const key = (m[1] || m[2]).toLowerCase();
+    for (const { item } of commands) {
+      if (item.key !== key || item.shift !== e.shiftKey) continue;
+      const mods = isMac
+        ? item.alt === e.altKey && item.ctrl === e.ctrlKey
+        : (item.alt || item.ctrl) === e.altKey;
+      if (!mods) continue;
+      e.preventDefault();
+      e.stopPropagation();
+      run(item.cmd);
+      return;
+    }
+  }
+
+  function openFiles(files) {
+    if (files && files.length > 0 && api.openFiles) api.openFiles(files);
+  }
+
+  // The API the viewer (in the iframe) uses; see menu_js.go, opendoc_js.go
+  // and platform_js.go. openFiles is set by the viewer.
+  const api = {
+    location: window.location,
+    installMenus,
+    setMenuState,
+    setTitle: (title) => { document.title = title; },
+    openFileDialog: () => fileInput.click(),
+    openFiles: null,
+  };
+  window.stepview = api;
+
+  fileInput.addEventListener("change", () => {
+    openFiles(fileInput.files);
+    fileInput.value = "";
+    focusViewer();
+  });
+
+  window.addEventListener("keydown", onKeyDown, true);
+  document.addEventListener("mousedown", (e) => {
+    if (openMenu && !openMenu.contains(e.target)) closeMenus();
+  });
+  window.addEventListener("blur", () => setTimeout(() => {
+    // Focus moving into the viewer closes the menus too.
+    if (document.activeElement === viewer) closeMenus();
+  }));
+
+  // Files dropped on the menu bar are opened too (the viewer itself takes
+  // drops on the 3D view).
+  bar.addEventListener("dragover", (e) => e.preventDefault());
+  bar.addEventListener("drop", (e) => {
+    e.preventDefault();
+    openFiles(e.dataTransfer && e.dataTransfer.files);
+  });
+
+  function watchViewer() {
+    try {
+      const w = viewer.contentWindow;
+      w.addEventListener("keydown", onKeyDown, true);
+      w.addEventListener("mousedown", closeMenus, true);
+    } catch (e) {
+      // Another origin: shortcuts only work outside the viewer.
+    }
+  }
+  viewer.addEventListener("load", watchViewer);
+})();
+</script>
+</body>
+</html>

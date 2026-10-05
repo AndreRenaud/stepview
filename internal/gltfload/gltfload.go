@@ -9,8 +9,7 @@ import (
 	"io/fs"
 	"math"
 	"net/url"
-	"os"
-	"path/filepath"
+	"path"
 	"slices"
 	"strings"
 
@@ -24,11 +23,26 @@ import (
 // LoadFile reads a .gltf or .glb file. glTF uses metres with Y up; the
 // result is converted to millimetres with Z up to match STEP data.
 func LoadFile(path string) (*step.Model, error) {
-	doc, err := gltf.Open(path)
+	return LoadFS(meshload.OSFS(path))
+}
+
+// LoadFS reads a .gltf or .glb file from fsys, like LoadFile. The buffers
+// and images it refers to are read from the same directory of fsys.
+func LoadFS(fsys fs.FS, name string) (*step.Model, error) {
+	f, err := fsys.Open(name)
 	if err != nil {
 		return nil, err
 	}
-	return load(doc, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), os.DirFS(filepath.Dir(path)))
+	defer f.Close()
+	dir, err := fs.Sub(fsys, path.Dir(name))
+	if err != nil {
+		return nil, err
+	}
+	doc := new(gltf.Document)
+	if err := gltf.NewDecoderFS(f, dir).Decode(doc); err != nil {
+		return nil, err
+	}
+	return load(doc, strings.TrimSuffix(path.Base(name), path.Ext(name)), dir)
 }
 
 // load converts a decoded document; name labels the root node and fsys

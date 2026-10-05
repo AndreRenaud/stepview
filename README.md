@@ -18,12 +18,38 @@ make            # bin/stepview and bin/stepinfo
 make test
 make app        # build/StepView.app (make universal for arm64 + amd64)
 make install    # copy the app into /Applications
+make web        # build/web, the browser version (see below)
 ```
+
+### Web version
+
+`make web` builds the viewer for WebAssembly into `build/web`, a static site
+that can be published as is (GitHub Pages, S3, any web server):
+
+| File | Purpose |
+| --- | --- |
+| `index.html` | the page: menu bar, file dialog and shortcuts around the viewer |
+| `viewer.html` | runs the viewer in an iframe, full frame, as Ebitengine expects |
+| `stepview.wasm` | the viewer (about 26 MB, 6.5 MB compressed) |
+| `wasm_exec.js` | Go's WebAssembly support, from the Go that built it |
+
+`make serve` builds it and serves it on <http://localhost:8080>. The server
+should send `.wasm` files as `application/wasm` and compressed; the page
+still works without either, but starts more slowly.
+
+Drop files on the page, or choose File > Open…, to view them. Files are read
+in the browser and never uploaded. Drop a model together with the files it
+refers to (an OBJ's `.mtl` and textures, a glTF's `.bin` and images), or
+drop the folder holding them. A model on the web can be opened with the
+`model` parameter, relative to the page, e.g.
+`index.html?model=samples/part.step`; the files it refers to are fetched
+from the same site.
 
 ## Using it
 
 - **File > Open…** (⌘O) chooses a file; a path on the command line is loaded
-  at startup.
+  at startup. Files can also be dropped on the window. With nothing open,
+  **Load Benchy Demo** shows the built-in demo model.
   On macOS the app bundle also opens any of these files double-clicked in
   Finder or dropped on its Dock icon.
 - The tree on the left shows the product structure. Click an item to select
@@ -73,7 +99,9 @@ make install    # copy the app into /Applications
   and shared, so adjacent faces meet without cracks.
 
 `internal/gltfload` and `internal/meshload` turn glTF, OBJ, STL, 3MF and 3DS
-files into the same model tree. OBJ groups, 3MF build items and components,
+files into the same model tree. They read through an `fs.FS`, which holds
+the files a model refers to as well: the disk, the files dropped on the
+window, or a web site. OBJ groups, 3MF build items and components,
 and the 3DS keyframer hierarchy become tree nodes. Colours come from MTL and
 3DS material diffuse colours, STL facet colours (VisCAM and Materialise
 conventions) and 3MF base materials and colour groups. Vertices are welded
@@ -105,6 +133,17 @@ blended over the opaque picture where they are in front of it. Ebitengine has no
 found in three passes that build a 24-bit depth one byte at a time with a
 "max" blend, followed by a colour pass. Picking is a CPU ray cast against the
 original triangles.
+
+`cmd/stl2step` joins mesh files into a STEP assembly, one faceted B-rep part
+per file, optionally simplified (by quadric edge collapse) and coloured. The
+demo model, `demo/3DBenchy.step.gz`, is the multi-part
+[#3DBenchy](https://github.com/CreativeTools/3DBenchy) by Creative Tools,
+which is in the public domain (CC0), made with it by `demo/benchy.sh`:
+
+```sh
+git clone https://github.com/CreativeTools/3DBenchy
+demo/benchy.sh 3DBenchy
+```
 
 `cmd/stepinfo` is a debugging tool. It prints load statistics and the product
 tree, and can render a preview PNG without opening a window:
@@ -148,5 +187,8 @@ loads all of them.
   interleaved transparent surfaces can blend in the wrong order. In high
   quality mode they get the simple lighting of normal mode, without
   ambient occlusion.
+- In the browser, Go runs on the page's only thread, so loading is several
+  times slower than on the desktop, and the page stops responding while a
+  STEP file is parsed.
 - Only B-rep and faceted geometry is shown. Wireframe, PMI and tessellated
   (AP242 `TESSELLATED_*`) data are ignored.

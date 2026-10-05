@@ -5,25 +5,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/AndreRenaud/stepview/internal/step"
 )
-
-// LoadOBJ reads a Wavefront OBJ file and the diffuse colours, opacities and
-// textures from its MTL material libraries. OBJ has no units and is conventionally
-// Y up, so the model is turned to Z up and its coordinates are used as
-// millimetres.
-func LoadOBJ(path string) (*step.Model, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return loadOBJ(data, baseName(path), dirOpener(filepath.Dir(path)))
-}
 
 type objGroup struct {
 	name string
@@ -42,8 +28,10 @@ func newOBJMaterial() *objMaterial {
 	return &objMaterial{colour: defaultColour, alpha: 1, scale: [2]float32{1, 1}}
 }
 
-// loadOBJ parses an OBJ file; open reads a material library or texture
-// named in it.
+// loadOBJ reads a Wavefront OBJ file and the diffuse colours, opacities and
+// textures from its MTL material libraries. OBJ has no units and is conventionally
+// Y up, so the model is turned to Z up and its coordinates are used as
+// millimetres. open reads a material library or texture named in it.
 func loadOBJ(data []byte, name string, open func(string) ([]byte, error)) (*step.Model, error) {
 	var (
 		pos      [][3]float32
