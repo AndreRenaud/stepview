@@ -125,9 +125,10 @@ install: app
 
 # The browser version. index.html holds the menus and file dialog around
 # viewer.html, which runs the viewer full window as Ebitengine expects.
-# wasm_exec.js must come from the Go that built stepview.wasm.
+# wasm_exec.js must come from the Go that built stepview.wasm. The icons in
+# web/ are $(ICON) scaled down with sips to 32 and 180 pixels.
 web: $(WEB)/stepview.wasm
-	install -m 644 web/index.html web/viewer.html $(WEB)/
+	install -m 644 web/index.html web/viewer.html web/favicon-32.png web/apple-touch-icon.png $(WEB)/
 	install -m 644 "$$($(GO) env GOROOT)/lib/wasm/wasm_exec.js" $(WEB)/
 	@echo "Built $(WEB)"
 
@@ -136,6 +137,9 @@ $(WEB)/stepview.wasm: $(GO_SRC) | check
 
 serve: web
 	python3 -m http.server --directory $(WEB) $(PORT)
+
+publish: web
+	scp $(WEB)/* kaka:/var/www/home.ignavus.net/stepview/
 
 clean:
 	rm -rf $(BIN) $(BUILD)
